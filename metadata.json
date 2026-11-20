@@ -1,0 +1,6 @@
+{
+  "name": "TubeVault",
+  "description": "Advanced YouTube iframe player, bulk link queue, and offline PWA media vault with IndexedDB caching.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
