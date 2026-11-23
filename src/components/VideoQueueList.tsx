@@ -1,4 +1,4 @@
-import React, {useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -46,6 +46,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
   onDeleteVideo,
   layout = 'sidebar',
 }) => {
+  const pageBatch = layout === 'grid' ? 24 : 30;
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCollection, setActiveCollection] = useState('All');
   const [typeFilter, setTypeFilter] = useState<'all' | 'continue' | 'bookmarked' | 'chapters'>(
@@ -53,6 +54,8 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
   );
   const [sortBy, setSortBy] = useState<'queue' | 'recent' | 'duration' | 'title'>('queue');
   const [cardSize, setCardSize] = useState<'large' | 'cinema'>('large');
+  const [visibleCount, setVisibleCount] = useState(pageBatch);
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -80,6 +83,34 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
     }
     return list;
   }, [videos, searchQuery, activeCollection, typeFilter, sortBy]);
+
+  useEffect(() => {
+    setVisibleCount(pageBatch);
+  }, [searchQuery, activeCollection, typeFilter, sortBy, pageBatch]);
+
+  const visibleItems = useMemo(
+    () => filtered.slice(0, visibleCount),
+    [filtered, visibleCount]
+  );
+
+  const hasMore = visibleItems.length < filtered.length;
+
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!hasMore || !el || typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleCount((prev) => Math.min(filtered.length, prev + pageBatch));
+        }
+      },
+      {rootMargin: '400px'}
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore, filtered.length, pageBatch]);
 
   function handleSelectTitle(id: string) {
     onStopInline();
@@ -196,7 +227,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
               : 'grid grid-cols-1 lg:grid-cols-2 gap-6'
           }
         >
-          {filtered.map((item) => {
+          {visibleItems.map((item) => {
             const inlineKey = `${keyPrefix}:${item.id}`;
             const isActive = item.id === activeVideoId;
             const isInlinePlaying = activeInlineKey === inlineKey;
@@ -327,7 +358,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
       ) : (
         /* Sidebar Queue: expands card cleanly with taller player height when playing inline */
         <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] divide-y divide-slate-100 dark:divide-[#1E2430] overflow-hidden">
-          {filtered.map((item, idx) => {
+          {visibleItems.map((item, idx) => {
             const inlineKey = `${keyPrefix}:${item.id}`;
             const isActive = item.id === activeVideoId;
             const isInlinePlaying = activeInlineKey === inlineKey;
@@ -467,6 +498,18 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {hasMore && (
+        <div ref={loadMoreRef} className="pt-2 flex items-center justify-center">
+          <button
+            type="button"
+            onClick={() => setVisibleCount((prev) => Math.min(filtered.length, prev + pageBatch))}
+            className="min-h-[40px] px-4 rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-rose-500/60 transition-colors cursor-pointer"
+          >
+            Load more ({filtered.length - visibleItems.length} remaining)
+          </button>
         </div>
       )}
     </div>

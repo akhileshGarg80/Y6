@@ -18,6 +18,8 @@ interface SuggestionsDrawerModalProps {
   loading: boolean;
   isOnline: boolean;
   existingVideoIds: Set<string>;
+  autoHarvestToHome?: boolean;
+  onToggleAutoHarvest?: () => void;
   onPlaySuggestion: (suggested: SuggestedVideoInput) => void;
   onSaveAll: (items: SuggestedVideoInput[]) => Promise<number>;
   onClose: () => void;
@@ -29,6 +31,8 @@ export const SuggestionsDrawerModal: React.FC<SuggestionsDrawerModalProps> = ({
   loading,
   isOnline,
   existingVideoIds,
+  autoHarvestToHome = true,
+  onToggleAutoHarvest,
   onPlaySuggestion,
   onSaveAll,
   onClose,
@@ -199,6 +203,20 @@ export const SuggestionsDrawerModal: React.FC<SuggestionsDrawerModalProps> = ({
                 )}
                 <span>Save All</span>
               </button>
+
+              {onToggleAutoHarvest && (
+                <button
+                  type="button"
+                  onClick={onToggleAutoHarvest}
+                  className={`min-h-[34px] px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                    autoHarvestToHome
+                      ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      : 'border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  <span>Auto-Add to Home: {autoHarvestToHome ? 'ON' : 'OFF'}</span>
+                </button>
+              )}
             </div>
 
             {savedFeedback && (

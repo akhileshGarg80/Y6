@@ -1,4 +1,4 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {Film} from 'lucide-react';
 import {getThumbnailBlob, saveThumbnailBlob} from '../lib/offlineDb';
 
@@ -17,10 +17,37 @@ export const CachedThumbnail: React.FC<CachedThumbnailProps> = ({
   fit = 'contain',
   className = '',
 }) => {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const [inView, setInView] = useState(false);
   const [srcUrl, setSrcUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    const el = hostRef.current;
+    if (!el || inView) return;
+
+    if (typeof IntersectionObserver === 'undefined') {
+      setInView(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInView(true);
+          observer.disconnect();
+        }
+      },
+      {rootMargin: '250px'}
+    );
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [inView]);
+
+  useEffect(() => {
+    if (!inView) return;
+
     let active = true;
     let objectUrl: string | null = null;
     setFailed(false);
@@ -63,11 +90,12 @@ export const CachedThumbnail: React.FC<CachedThumbnailProps> = ({
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, [videoId, isOnline]);
+  }, [videoId, isOnline, inView]);
 
-  if (failed || !srcUrl) {
+  if (!inView || failed || !srcUrl) {
     return (
       <div
+        ref={hostRef}
         className={`flex flex-col items-center justify-center bg-gradient-to-br from-slate-200 to-slate-300 dark:from-[#171B24] dark:to-[#10131A] text-slate-500 dark:text-slate-400 select-none ${className}`}
       >
         <Film className="w-6 h-6 opacity-60" />
@@ -80,6 +108,8 @@ export const CachedThumbnail: React.FC<CachedThumbnailProps> = ({
     <img
       src={srcUrl}
       alt={alt}
+      loading="lazy"
+      decoding="async"
       referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
       className={`${fit === 'cover' ? 'object-cover' : 'object-contain bg-black'} ${className}`}

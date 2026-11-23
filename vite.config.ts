@@ -21,10 +21,10 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'TubeVault — Offline YouTube Queue & Player',
+          name: 'TubeVault — YouTube Hub & Music Player',
           short_name: 'TubeVault',
           description:
-            'Add unlimited YouTube links, play in an advanced theater iframe, and cache thumbnails, notes, and media for offline playback.',
+            'Fast YouTube hub, theater player, audio-only Music mode, and automatic suggested feed with instant local persistence.',
           theme_color: '#0B0D11',
           background_color: '#0B0D11',
           display: 'standalone',
@@ -52,8 +52,12 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallback: '/index.html',
+          navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
@@ -84,12 +88,26 @@ export default defineConfig(() => {
               },
             },
             {
+              urlPattern: /^https:\/\/i\.ytimg\.com\/.*/i,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'ytimg-cdn-cache',
+                expiration: {
+                  maxEntries: 300,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
               urlPattern: /\/api\/youtube\/thumbnail.*/i,
               handler: 'CacheFirst',
               options: {
                 cacheName: 'youtube-thumbnails-cache',
                 expiration: {
-                  maxEntries: 250,
+                  maxEntries: 300,
                   maxAgeSeconds: 60 * 60 * 24 * 30,
                 },
                 cacheableResponse: {
@@ -102,9 +120,25 @@ export default defineConfig(() => {
               handler: 'NetworkFirst',
               options: {
                 cacheName: 'youtube-metadata-cache',
+                networkTimeoutSeconds: 4,
                 expiration: {
                   maxEntries: 250,
                   maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            {
+              urlPattern: /\/api\/youtube\/related.*/i,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'youtube-related-cache',
+                networkTimeoutSeconds: 4,
+                expiration: {
+                  maxEntries: 120,
+                  maxAgeSeconds: 60 * 60 * 24 * 7,
                 },
                 cacheableResponse: {
                   statuses: [0, 200],
@@ -127,8 +161,8 @@ export default defineConfig(() => {
           if (error) {
             return;
           }
-          const distDir = path.resolve(__dirname, 'dist');
-          const srcAssets = path.resolve(__dirname, 'src/assets');
+          const distDir = path.resolve(import.meta.dirname, 'dist');
+          const srcAssets = path.resolve(import.meta.dirname, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
@@ -136,9 +170,23 @@ export default defineConfig(() => {
         },
       },
     ],
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id: string) {
+            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) {
+              return 'vendor-react';
+            }
+            if (id.includes('node_modules/lucide-react/')) {
+              return 'vendor-icons';
+            }
+          },
+        },
+      },
+    },
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {

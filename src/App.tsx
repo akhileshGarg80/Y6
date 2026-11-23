@@ -1,4 +1,4 @@
-import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import React, {Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Compass,
   Database,
@@ -14,24 +14,23 @@ import {
   WifiOff,
 } from 'lucide-react';
 import {CachedThumbnail} from './components/CachedThumbnail';
-import {DiscoverSearchView} from './components/DiscoverSearchView';
 import {
   MusicMiniBar,
   MusicPlayerView,
   useMusicAudioEngine,
 } from './components/MusicPlayerView';
 import {PWAInstallButton} from './components/PWAInstallButton';
-import {QuickAddHubModal} from './components/QuickAddHubModal';
-import {StorageManagerView} from './components/StorageManagerView';
-import {SuggestionsDrawerModal} from './components/SuggestionsDrawerModal';
 import {VideoPlayerStage} from './components/VideoPlayerStage';
 import {VideoQueueList} from './components/VideoQueueList';
 import {useOnlineStatus} from './hooks/useOnlineStatus';
 import {
   deleteVideoRecord,
   getAllVideos,
+  getCachedSettingSync,
+  getCachedVideosSync,
   getSetting,
   getStorageStats,
+  requestPersistentStorage,
   saveThumbnailBlob,
   saveVideo,
   saveVideosBulk,
@@ -48,7 +47,20 @@ import type {
   VideoItem,
 } from './types/video';
 
-const DEFAULT_COLLECTIONS = ['Watch Later', 'Tutorials', 'Music', 'Podcasts'];
+const DiscoverSearchView = lazy(() =>
+  import('./components/DiscoverSearchView').then((m) => ({default: m.DiscoverSearchView}))
+);
+const StorageManagerView = lazy(() =>
+  import('./components/StorageManagerView').then((m) => ({default: m.StorageManagerView}))
+);
+const QuickAddHubModal = lazy(() =>
+  import('./components/QuickAddHubModal').then((m) => ({default: m.QuickAddHubModal}))
+);
+const SuggestionsDrawerModal = lazy(() =>
+  import('./components/SuggestionsDrawerModal').then((m) => ({default: m.SuggestionsDrawerModal}))
+);
+
+const DEFAULT_COLLECTIONS = ['Watch Later', 'Suggested Hub', 'Tutorials', 'Music', 'Podcasts'];
 
 const STARTER_VIDEO_IDS = [
   {videoId: 'aqz-KE-bpKQ', collection: 'Watch Later'},
@@ -60,10 +72,26 @@ const STARTER_VIDEO_IDS = [
 export default function App() {
   const {isOnline} = useOnlineStatus();
 
-  const [videos, setVideos] = useState<VideoItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const initialBootVideos = useMemo(() => getCachedVideosSync(), []);
+  const initialTheme = useMemo(() => getCachedSettingSync<'dark' | 'light'>('theme', 'dark'), []);
+  const initialActiveId = useMemo(
+    () => getCachedSettingSync<string | null>('activeVideoId', null),
+    []
+  );
+  const initialAutoHarvest = useMemo(
+    () => getCachedSettingSync<boolean>('autoHarvestToHome', true),
+    []
+  );
+
+  const [videos, setVideos] = useState<VideoItem[]>(initialBootVideos);
+  const [loading, setLoading] = useState(initialBootVideos.length === 0);
   const [activeView, setActiveView] = useState<AppView>('home');
-  const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
+  const [activeVideoId, setActiveVideoId] = useState<string | null>(() => {
+    if (initialActiveId && initialBootVideos.some((v) => v.id === initialActiveId)) {
+      return initialActiveId;
+    }
+    return initialBootVideos[0]?.id ?? null;
+  });
   const [autoPlaySignal, setAutoPlaySignal] = useState(0);
   const [pauseStageSignal, setPauseStageSignal] = useState(0);
   const [pauseMusicSignal, setPauseMusicSignal] = useState(0);
@@ -78,12 +106,12 @@ export default function App() {
   const [theaterMode, setTheaterMode] = useState(true);
   const [zenMode, setZenMode] = useState(false);
   const [autoNextEnabled, setAutoNextEnabled] = useState(true);
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(initialTheme === 'dark');
   const [stats, setStats] = useState<StorageStats>({
     quotaBytes: null,
     usageBytes: null,
-    videoCount: 0,
-    cachedThumbsCount: 0,
+    videoCount: initialBootVideos.length,
+    cachedThumbsCount: initialBootVideos.filter((v) => v.thumbCached).length,
   });
 
   const stageAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -102,7 +130,11 @@ export default function App() {
   const [autoSuggestions, setAutoSuggestions] = useState<RelatedVideoItem[]>([]);
   const [autoSuggestionsLoading, setAutoSuggestionsLoading] = useState(false);
   const [showSuggestionsModal, setShowSuggestionsModal] = useState(false);
+  const [autoHarvestToHome, setAutoHarvestToHome] = useState(initialAutoHarvest);
+  const [hubFeedNotice, setHubFeedNotice] = useState<string | null>(null);
   const suggestionsCacheRef = useRef<Map<string, RelatedVideoItem[]>>(new Map());
+  const dismissedVideoIdsRef = useRef<Set<string>>(new Set());
+  const hubNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleMusicPlaybackStarted = useCallback(() => {
     setActivePlayback((prev) => ({
@@ -135,14 +167,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    async function init() {
-      const [loadedVideos, savedTheme, savedActiveId, alreadyInitialized] = await Promise.all([
-        getAllVideos(),
-        getSetting<'dark' | 'light'>('theme', 'dark'),
-        getSetting<string | null>('activeVideoId', null),
-        getSetting<boolean>('initialized', false),
-      ]);
+    document.documentElement.classList.toggle('dark', initialTheme === 'dark');
+    requestPersistentStorage();
 
+    async function init() {
+      const [loadedVideos, savedTheme, savedActiveId, alreadyInitialized, savedAutoHarvest] =
+        await Promise.all([
+          getAllVideos(),
+          getSetting<'dark' | 'light'>('theme', initialTheme),
+          getSetting<string | null>('activeVideoId', initialActiveId),
+          getSetting<boolean>('initialized', false),
+          getSetting<boolean>('autoHarvestToHome', initialAutoHarvest),
+        ]);
+
+      setAutoHarvestToHome(savedAutoHarvest);
       setDarkMode(savedTheme === 'dark');
       document.documentElement.classList.toggle('dark', savedTheme === 'dark');
 
@@ -236,7 +274,7 @@ export default function App() {
       setLoading(false);
     }
     init();
-  }, [refreshStats]);
+  }, [refreshStats, initialTheme, initialActiveId, initialAutoHarvest]);
 
   // Observe scroll past player stage -> float smoothly to Mini-Player
   useEffect(() => {
@@ -316,9 +354,116 @@ export default function App() {
     }
   }, [activeVideo, activePlayback?.source, musicController.activeTrack]);
 
-  // Automatically fetch ALL suggested URLs whenever suggestionSource changes
+  const toggleAutoHarvest = useCallback(() => {
+    setAutoHarvestToHome((prev) => {
+      const next = !prev;
+      setSetting('autoHarvestToHome', next);
+      return next;
+    });
+  }, []);
+
+  // Automatically save ALL fetched suggested URLs into Home feed so TubeVault grows into a YouTube Hub
+  const harvestSuggestionsToHome = useCallback(
+    async (list: RelatedVideoItem[]) => {
+      if (!list || list.length === 0) return;
+
+      const existingIds = new Set(videosRef.current.map((v) => v.videoId));
+      const fresh = list.filter(
+        (item) =>
+          /^[a-zA-Z0-9_-]{11}$/.test(item.videoId) &&
+          !existingIds.has(item.videoId) &&
+          !capturingSuggestedIdsRef.current.has(item.videoId) &&
+          !dismissedVideoIdsRef.current.has(item.videoId)
+      );
+
+      if (fresh.length === 0) return;
+
+      for (const item of fresh) {
+        capturingSuggestedIdsRef.current.add(item.videoId);
+      }
+
+      try {
+        const minAddedAt = videosRef.current.reduce(
+          (min, v) => (v.addedAt < min ? v.addedAt : min),
+          Date.now()
+        );
+
+        // Anchor addedAt cleanly below existing/active items so playing cards never jump off-screen
+        const created: VideoItem[] = fresh.map((item, idx) => ({
+          id: `${item.videoId}-${Date.now()}-hub-${idx}`,
+          videoId: item.videoId,
+          originalUrl: item.watchUrl || `https://www.youtube.com/watch?v=${item.videoId}`,
+          title: item.title?.trim() || `YouTube Video (${item.videoId})`,
+          authorName: item.authorName?.trim() || 'YouTube Creator',
+          authorUrl: item.authorUrl || '',
+          description: '',
+          durationSeconds: item.durationSeconds ?? null,
+          collection: 'Suggested Hub',
+          addedAt: minAddedAt - 10 - idx * 10,
+          lastWatchedAt: null,
+          lastPositionSeconds: 0,
+          playbackRate: 1,
+          bookmarks: [],
+          notes: '',
+          thumbCached: false,
+        }));
+
+        setVideos((prev) => {
+          const seen = new Set(prev.map((v) => v.videoId));
+          const uniqueNew = created.filter((c) => !seen.has(c.videoId));
+          if (uniqueNew.length === 0) return prev;
+          return [...prev, ...uniqueNew];
+        });
+
+        await saveVideosBulk(created);
+        setHubFeedNotice(`+${created.length} auto-added to Home Hub`);
+        if (hubNoticeTimerRef.current) clearTimeout(hubNoticeTimerRef.current);
+        hubNoticeTimerRef.current = setTimeout(() => setHubFeedNotice(null), 4500);
+        refreshStats();
+
+        // Gently cache top 6 thumbnails in background without saturating bandwidth
+        if (navigator.onLine) {
+          const thumbBatch = created.slice(0, 6);
+          const cachedIds: string[] = [];
+          for (const item of thumbBatch) {
+            try {
+              const tResp = await fetch(
+                `/api/youtube/thumbnail?videoId=${encodeURIComponent(item.videoId)}`
+              );
+              if (tResp.ok) {
+                const blob = await tResp.blob();
+                await saveThumbnailBlob(item.videoId, blob);
+                cachedIds.push(item.id);
+              }
+            } catch {
+              // Ignore thumbnail fetch hiccups
+            }
+          }
+
+          if (cachedIds.length > 0) {
+            const idSet = new Set(cachedIds);
+            setVideos((prev) =>
+              prev.map((v) => (idSet.has(v.id) ? {...v, thumbCached: true} : v))
+            );
+            const updatedItems = thumbBatch
+              .filter((c) => idSet.has(c.id))
+              .map((c) => ({...c, thumbCached: true}));
+            await saveVideosBulk(updatedItems);
+            refreshStats();
+          }
+        }
+      } finally {
+        for (const item of fresh) {
+          capturingSuggestedIdsRef.current.delete(item.videoId);
+        }
+      }
+    },
+    [refreshStats]
+  );
+
+  // Automatically fetch ALL suggested URLs whenever suggestionSource changes, and harvest to Home Hub
   useEffect(() => {
-    if (!suggestionSource?.videoId || !isOnline) {
+    if (loading || !suggestionSource?.videoId || !isOnline) {
       if (!isOnline) setAutoSuggestionsLoading(false);
       return;
     }
@@ -328,6 +473,9 @@ export default function App() {
     if (cached) {
       setAutoSuggestions(cached);
       setAutoSuggestionsLoading(false);
+      if (autoHarvestToHome) {
+        harvestSuggestionsToHome(cached);
+      }
       return;
     }
 
@@ -340,6 +488,9 @@ export default function App() {
         const list = Array.isArray(data?.related) ? data.related : [];
         suggestionsCacheRef.current.set(ytId, list);
         setAutoSuggestions(list);
+        if (autoHarvestToHome && list.length > 0) {
+          harvestSuggestionsToHome(list);
+        }
       })
       .catch(() => {
         if (!cancelled) setAutoSuggestions([]);
@@ -351,7 +502,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [suggestionSource?.videoId, isOnline]);
+  }, [loading, suggestionSource?.videoId, isOnline, autoHarvestToHome, harvestSuggestionsToHome]);
 
   // Claim playback for an inline card -> pauses stage & music, AND auto-fetches suggestions for Top Nav
   const handlePlayInline = useCallback((key: string, titleHint?: string) => {
@@ -696,6 +847,7 @@ export default function App() {
 
   const handleDeleteVideo = useCallback(
     async (target: VideoItem) => {
+      dismissedVideoIdsRef.current.add(target.videoId);
       await deleteVideoRecord(target.id, target.videoId);
       setVideos((prev) => {
         const next = prev.filter((v) => v.id !== target.id);
@@ -892,26 +1044,42 @@ export default function App() {
             controller={musicController}
           />
         ) : activeView === 'discover' ? (
-          <DiscoverSearchView
-            existingVideoIds={existingVideoIds}
-            collections={collections}
-            isOnline={isOnline}
-            activeInlineKey={activeInlineKey}
-            onPlayInline={handlePlayInline}
-            onStopInline={handleStopInline}
-            onCaptureSuggestedVideo={(s) => handleCaptureSuggestedVideo(s, false)}
-            initialQuery={discoverInitialQuery}
-            onAdded={handleAddedVideos}
-            onPlayExisting={handlePlayExistingByYtId}
-          />
+          <Suspense
+            fallback={
+              <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-10 text-center text-xs text-slate-500">
+                Loading Discover...
+              </div>
+            }
+          >
+            <DiscoverSearchView
+              existingVideoIds={existingVideoIds}
+              collections={collections}
+              isOnline={isOnline}
+              activeInlineKey={activeInlineKey}
+              onPlayInline={handlePlayInline}
+              onStopInline={handleStopInline}
+              onCaptureSuggestedVideo={(s) => handleCaptureSuggestedVideo(s, false)}
+              initialQuery={discoverInitialQuery}
+              onAdded={handleAddedVideos}
+              onPlayExisting={handlePlayExistingByYtId}
+            />
+          </Suspense>
         ) : activeView === 'storage' ? (
-          <StorageManagerView
-            stats={stats}
-            videos={videos}
-            isOnline={isOnline}
-            onRefreshLibrary={refreshLibrary}
-            onStatsChange={refreshStats}
-          />
+          <Suspense
+            fallback={
+              <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-10 text-center text-xs text-slate-500">
+                Loading Library...
+              </div>
+            }
+          >
+            <StorageManagerView
+              stats={stats}
+              videos={videos}
+              isOnline={isOnline}
+              onRefreshLibrary={refreshLibrary}
+              onStatsChange={refreshStats}
+            />
+          </Suspense>
         ) : activeView === 'home' ? (
           videos.length === 0 ? (
             <div className="max-w-xl mx-auto py-16 text-center space-y-4">
@@ -935,17 +1103,41 @@ export default function App() {
             </div>
           ) : (
             <div className="space-y-6">
-              <div>
-                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-                  Listen &amp; Watch
-                </h1>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-                  <span>{videos.length} videos</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{stats.cachedThumbsCount} thumbs cached</span>
-                  <span aria-hidden="true">·</span>
-                  <span>{collections.length} collections</span>
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
+                    Listen &amp; Watch
+                  </h1>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
+                    <span>{videos.length} videos</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{stats.cachedThumbsCount} thumbs cached</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{collections.length} collections</span>
+                    {hubFeedNotice && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                          {hubFeedNotice}
+                        </span>
+                      </>
+                    )}
+                  </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={toggleAutoHarvest}
+                  title="Automatically save suggested video URLs to your Home feed as you watch"
+                  className={`min-h-[36px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    autoHarvestToHome
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                      : 'border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  <Compass className="w-3.5 h-3.5 shrink-0" />
+                  <span>Auto-Hub: {autoHarvestToHome ? 'On' : 'Off'}</span>
+                </button>
               </div>
 
               {/* Continue Watching Spotlight Strip */}
@@ -1281,35 +1473,41 @@ export default function App() {
 
       {/* Unified Bottom '+' Quick Add Hub Modal */}
       {showQuickAddHub && (
-        <QuickAddHubModal
-          existingVideoIds={existingVideoIds}
-          collections={collections}
-          isOnline={isOnline}
-          onAddedLinks={(items) => handleAddedVideos(items, false)}
-          onImportedLibrary={async () => {
-            await refreshLibrary();
-            await refreshStats();
-          }}
-          onOpenDiscover={(q) => {
-            setDiscoverInitialQuery(q);
-            setActiveView('discover');
-          }}
-          onClose={() => setShowQuickAddHub(false)}
-        />
+        <Suspense fallback={null}>
+          <QuickAddHubModal
+            existingVideoIds={existingVideoIds}
+            collections={collections}
+            isOnline={isOnline}
+            onAddedLinks={(items) => handleAddedVideos(items, false)}
+            onImportedLibrary={async () => {
+              await refreshLibrary();
+              await refreshStats();
+            }}
+            onOpenDiscover={(q) => {
+              setDiscoverInitialQuery(q);
+              setActiveView('discover');
+            }}
+            onClose={() => setShowQuickAddHub(false)}
+          />
+        </Suspense>
       )}
 
       {/* Top Nav 'Suggestion' Drawer Modal showing ALL auto-fetched URLs */}
       {showSuggestionsModal && (
-        <SuggestionsDrawerModal
-          sourceVideo={suggestionSource}
-          suggestions={autoSuggestions}
-          loading={autoSuggestionsLoading}
-          isOnline={isOnline}
-          existingVideoIds={existingVideoIds}
-          onPlaySuggestion={(suggested) => handleCaptureSuggestedVideo(suggested, true)}
-          onSaveAll={handleSaveAllSuggested}
-          onClose={() => setShowSuggestionsModal(false)}
-        />
+        <Suspense fallback={null}>
+          <SuggestionsDrawerModal
+            sourceVideo={suggestionSource}
+            suggestions={autoSuggestions}
+            loading={autoSuggestionsLoading}
+            isOnline={isOnline}
+            existingVideoIds={existingVideoIds}
+            autoHarvestToHome={autoHarvestToHome}
+            onToggleAutoHarvest={toggleAutoHarvest}
+            onPlaySuggestion={(suggested) => handleCaptureSuggestedVideo(suggested, true)}
+            onSaveAll={handleSaveAllSuggested}
+            onClose={() => setShowSuggestionsModal(false)}
+          />
+        </Suspense>
       )}
     </div>
   );
