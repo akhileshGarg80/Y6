@@ -139,14 +139,18 @@ function normalizeLockupVideo(lv: Record<string, unknown>, fallbackAuthor: strin
     }
   }
 
+  const resolvedAuthor = fallbackAuthor || rowTexts[0] || 'YouTube Creator';
+  const resolvedViews =
+    !fallbackAuthor && rowTexts.length > 1 ? rowTexts.slice(1).join(' · ') : rowTexts.join(' · ');
+
   return {
     videoId,
     title,
-    authorName: fallbackAuthor || 'YouTube Channel',
+    authorName: resolvedAuthor,
     authorUrl: '',
     durationText,
     durationSeconds: durationText ? parseDurationText(durationText) : null,
-    viewText: rowTexts.join(' · '),
+    viewText: resolvedViews,
     watchUrl: `https://www.youtube.com/watch?v=${videoId}`,
   };
 }
@@ -649,6 +653,67 @@ async function startServer() {
       res.json(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Search failed';
+      res.status(502).json({error: msg});
+    }
+  });
+
+  // In-app Suggested / Related Videos for a currently playing YouTube video
+  app.get('/api/youtube/related', async (req, res) => {
+    const videoId = String(req.query.videoId || '').trim();
+    if (!isValidVideoId(videoId)) {
+      res.status(400).json({error: 'Invalid YouTube video ID'});
+      return;
+    }
+
+    try {
+      const resp = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+        headers: YT_HEADERS,
+        signal: AbortSignal.timeout(8500),
+      });
+      if (!resp.ok) {
+        throw new Error(`Related lookup returned ${resp.status}`);
+      }
+      const html = await resp.text();
+      const data = extractYtInitialData(html);
+      if (!data) {
+        res.json({videoId, related: []});
+        return;
+      }
+
+      const secondary =
+        (
+          data.contents as
+            | {twoColumnWatchNextResults?: {secondaryResults?: {secondaryResults?: unknown}}}
+            | undefined
+        )?.twoColumnWatchNextResults?.secondaryResults?.secondaryResults || data;
+
+      const seen = new Set<string>([videoId]);
+      const related: ExtractedVideo[] = [];
+
+      for (const raw of collectByKey(secondary, 'lockupViewModel')) {
+        const lv = raw as Record<string, unknown>;
+        if (lv.contentType === 'LOCKUP_CONTENT_TYPE_PLAYLIST') continue;
+        const item = normalizeLockupVideo(lv, '');
+        if (item && !seen.has(item.videoId)) {
+          seen.add(item.videoId);
+          related.push(item);
+        }
+      }
+
+      for (const raw of collectByKey(secondary, 'compactVideoRenderer')) {
+        const item = normalizeLegacyVideoRenderer(raw as Record<string, unknown>);
+        if (item && !seen.has(item.videoId)) {
+          seen.add(item.videoId);
+          related.push(item);
+        }
+      }
+
+      res.json({
+        videoId,
+        related: related.slice(0, 36),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not fetch suggested videos';
       res.status(502).json({error: msg});
     }
   });

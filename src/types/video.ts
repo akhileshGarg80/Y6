@@ -44,3 +44,23 @@ export interface ActivePlayback {
   key: string;
   token: number;
 }
+
+export interface SuggestedVideoInput {
+  videoId: string;
+  title?: string;
+  authorName?: string;
+  authorUrl?: string;
+  durationSeconds?: number | null;
+}
+
+export interface RelatedVideoItem {
+  videoId: string;
+  title: string;
+  authorName: string;
+  authorUrl: string;
+  durationText: string;
+  durationSeconds: number | null;
+  viewText: string;
+  watchUrl: string;
+}
+

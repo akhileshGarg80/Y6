@@ -1,9 +1,11 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Compass,
   Database,
   Film,
   Headphones,
   Home,
+  Loader2,
   Moon,
   Play,
   Plus,
@@ -21,6 +23,7 @@ import {
 import {PWAInstallButton} from './components/PWAInstallButton';
 import {QuickAddHubModal} from './components/QuickAddHubModal';
 import {StorageManagerView} from './components/StorageManagerView';
+import {SuggestionsDrawerModal} from './components/SuggestionsDrawerModal';
 import {VideoPlayerStage} from './components/VideoPlayerStage';
 import {VideoQueueList} from './components/VideoQueueList';
 import {useOnlineStatus} from './hooks/useOnlineStatus';
@@ -35,7 +38,15 @@ import {
   setSetting,
 } from './lib/offlineDb';
 import {formatDuration} from './lib/youtube';
-import type {ActivePlayback, AppView, StorageStats, VideoChapter, VideoItem} from './types/video';
+import type {
+  ActivePlayback,
+  AppView,
+  RelatedVideoItem,
+  StorageStats,
+  SuggestedVideoInput,
+  VideoChapter,
+  VideoItem,
+} from './types/video';
 
 const DEFAULT_COLLECTIONS = ['Watch Later', 'Tutorials', 'Music', 'Podcasts'];
 
@@ -64,7 +75,7 @@ export default function App() {
 
   const [showQuickAddHub, setShowQuickAddHub] = useState(false);
   const [discoverInitialQuery, setDiscoverInitialQuery] = useState<string | undefined>(undefined);
-  const [theaterMode, setTheaterMode] = useState(false);
+  const [theaterMode, setTheaterMode] = useState(true);
   const [zenMode, setZenMode] = useState(false);
   const [autoNextEnabled, setAutoNextEnabled] = useState(true);
   const [darkMode, setDarkMode] = useState(true);
@@ -76,6 +87,22 @@ export default function App() {
   });
 
   const stageAnchorRef = useRef<HTMLDivElement | null>(null);
+  const capturingSuggestedIdsRef = useRef<Set<string>>(new Set());
+  const videosRef = useRef<VideoItem[]>(videos);
+  videosRef.current = videos;
+  const activeVideoRef = useRef<VideoItem | null>(null);
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [autoSaveNotice, setAutoSaveNotice] = useState<string | null>(null);
+
+  // Top-Nav Automatic Suggestions State (tracks whichever video the user clicked anywhere in the app)
+  const [suggestionSource, setSuggestionSource] = useState<{
+    videoId: string;
+    title: string;
+  } | null>(null);
+  const [autoSuggestions, setAutoSuggestions] = useState<RelatedVideoItem[]>([]);
+  const [autoSuggestionsLoading, setAutoSuggestionsLoading] = useState(false);
+  const [showSuggestionsModal, setShowSuggestionsModal] = useState(false);
+  const suggestionsCacheRef = useRef<Map<string, RelatedVideoItem[]>>(new Map());
 
   const handleMusicPlaybackStarted = useCallback(() => {
     setActivePlayback((prev) => ({
@@ -261,6 +288,7 @@ export default function App() {
     () => videos.find((v) => v.id === activeVideoId) ?? videos[0] ?? null,
     [videos, activeVideoId]
   );
+  activeVideoRef.current = activeVideo;
 
   const continueWatchingVideo = useMemo(() => {
     const candidates = videos.filter((v) => v.lastPositionSeconds > 5);
@@ -271,8 +299,62 @@ export default function App() {
   const activeInlineKey =
     activePlayback?.source === 'inline' ? activePlayback.key : null;
 
-  // Claim playback for an inline card -> pauses stage video AND pauses music audio immediately
-  const handlePlayInline = useCallback((key: string) => {
+  // Keep Top-Nav Suggestions synced automatically to active Stage or Music video
+  useEffect(() => {
+    if (activePlayback?.source === 'music' && musicController.activeTrack) {
+      setSuggestionSource({
+        videoId: musicController.activeTrack.videoId,
+        title: musicController.activeTrack.title,
+      });
+      return;
+    }
+    if (activePlayback?.source !== 'inline' && activeVideo) {
+      setSuggestionSource({
+        videoId: activeVideo.videoId,
+        title: activeVideo.title,
+      });
+    }
+  }, [activeVideo, activePlayback?.source, musicController.activeTrack]);
+
+  // Automatically fetch ALL suggested URLs whenever suggestionSource changes
+  useEffect(() => {
+    if (!suggestionSource?.videoId || !isOnline) {
+      if (!isOnline) setAutoSuggestionsLoading(false);
+      return;
+    }
+
+    const ytId = suggestionSource.videoId;
+    const cached = suggestionsCacheRef.current.get(ytId);
+    if (cached) {
+      setAutoSuggestions(cached);
+      setAutoSuggestionsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAutoSuggestionsLoading(true);
+    fetch(`/api/youtube/related?videoId=${encodeURIComponent(ytId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: {related?: RelatedVideoItem[]} | null) => {
+        if (cancelled) return;
+        const list = Array.isArray(data?.related) ? data.related : [];
+        suggestionsCacheRef.current.set(ytId, list);
+        setAutoSuggestions(list);
+      })
+      .catch(() => {
+        if (!cancelled) setAutoSuggestions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setAutoSuggestionsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [suggestionSource?.videoId, isOnline]);
+
+  // Claim playback for an inline card -> pauses stage & music, AND auto-fetches suggestions for Top Nav
+  const handlePlayInline = useCallback((key: string, titleHint?: string) => {
     setActivePlayback((prev) => ({
       source: 'inline',
       key,
@@ -280,6 +362,24 @@ export default function App() {
     }));
     setPauseStageSignal((s) => s + 1);
     setPauseMusicSignal((s) => s + 1);
+
+    if (key.startsWith('discover:')) {
+      const ytId = key.slice('discover:'.length);
+      if (ytId) {
+        const match = videosRef.current.find((v) => v.videoId === ytId);
+        setSuggestionSource({
+          videoId: ytId,
+          title: match?.title || titleHint || `YouTube Video (${ytId})`,
+        });
+      }
+    } else {
+      const colonIdx = key.indexOf(':');
+      const itemId = colonIdx >= 0 ? key.slice(colonIdx + 1) : key;
+      const match = videosRef.current.find((v) => v.id === itemId);
+      if (match) {
+        setSuggestionSource({videoId: match.videoId, title: match.title});
+      }
+    }
   }, []);
 
   const handleStopInline = useCallback(() => {
@@ -294,6 +394,12 @@ export default function App() {
       token: (prev?.token ?? 0) + 1,
     }));
     setPauseMusicSignal((s) => s + 1);
+    if (activeVideoRef.current) {
+      setSuggestionSource({
+        videoId: activeVideoRef.current.videoId,
+        title: activeVideoRef.current.title,
+      });
+    }
   }, []);
 
   const handleSelectVideo = useCallback((id: string) => {
@@ -351,6 +457,236 @@ export default function App() {
       refreshStats();
     },
     [refreshStats, activeView, scrolledPastStage]
+  );
+
+  // Auto-save any suggested YouTube video (from native Suggested feed OR inside YouTube iframe)
+  // and immediately switch playback inside TubeVault without opening external YouTube!
+  const handleCaptureSuggestedVideo = useCallback(
+    async (suggested: SuggestedVideoInput, playInStage = false) => {
+      const ytId = suggested.videoId?.trim();
+      if (!ytId || !/^[a-zA-Z0-9_-]{11}$/.test(ytId)) return;
+
+      const showNotice = (msg: string) => {
+        setAutoSaveNotice(msg);
+        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+        autoSaveTimerRef.current = setTimeout(() => setAutoSaveNotice(null), 4000);
+      };
+
+      setSuggestionSource({
+        videoId: ytId,
+        title: suggested.title?.trim() || `YouTube Video (${ytId})`,
+      });
+
+      const existing = videosRef.current.find((v) => v.videoId === ytId);
+      if (existing) {
+        if (playInStage) {
+          setActivePlayback((prev) => ({
+            source: 'stage',
+            key: 'stage',
+            token: (prev?.token ?? 0) + 1,
+          }));
+          setPauseMusicSignal((s) => s + 1);
+          setActiveVideoId(existing.id);
+          setSetting('activeVideoId', existing.id);
+          setAutoPlaySignal((s) => s + 1);
+          setActiveView('player');
+          setMiniPlayerVisible(false);
+          setScrolledPastStage(false);
+          showNotice(`Playing saved video: ${existing.title}`);
+        }
+        return;
+      }
+
+      if (capturingSuggestedIdsRef.current.has(ytId)) return;
+      capturingSuggestedIdsRef.current.add(ytId);
+
+      try {
+        const now = Date.now();
+        const itemId = `${ytId}-${now}`;
+        const initialTitle = suggested.title?.trim() || `YouTube Video (${ytId})`;
+        const initialAuthor = suggested.authorName?.trim() || 'YouTube Creator';
+        const collection = activeVideoRef.current?.collection || 'Watch Later';
+
+        const draftItem: VideoItem = {
+          id: itemId,
+          videoId: ytId,
+          originalUrl: `https://www.youtube.com/watch?v=${ytId}`,
+          title: initialTitle,
+          authorName: initialAuthor,
+          authorUrl: suggested.authorUrl || '',
+          description: '',
+          durationSeconds: suggested.durationSeconds ?? null,
+          collection,
+          addedAt: now,
+          lastWatchedAt: playInStage ? now : null,
+          lastPositionSeconds: 0,
+          playbackRate: 1,
+          bookmarks: [],
+          notes: '',
+          thumbCached: false,
+        };
+
+        // Immediately save & switch playback with zero delay
+        setVideos((prev) => (prev.some((v) => v.videoId === ytId) ? prev : [draftItem, ...prev]));
+        await saveVideo(draftItem);
+
+        if (playInStage) {
+          setActivePlayback((prev) => ({
+            source: 'stage',
+            key: 'stage',
+            token: (prev?.token ?? 0) + 1,
+          }));
+          setPauseMusicSignal((s) => s + 1);
+          setActiveVideoId(draftItem.id);
+          setSetting('activeVideoId', draftItem.id);
+          setAutoPlaySignal((s) => s + 1);
+          setActiveView('player');
+          setMiniPlayerVisible(false);
+          setScrolledPastStage(false);
+        }
+
+        showNotice(`Auto-saved link & playing: ${initialTitle}`);
+
+        // Silently enrich full metadata, chapters & cached thumbnail in background
+        let enriched = {...draftItem};
+        if (navigator.onLine) {
+          const [metaResult, thumbResult] = await Promise.allSettled([
+            fetch(`/api/youtube/metadata?videoId=${encodeURIComponent(ytId)}`).then((r) =>
+              r.ok ? r.json() : null
+            ),
+            fetch(`/api/youtube/thumbnail?videoId=${encodeURIComponent(ytId)}`).then((r) =>
+              r.ok ? r.blob() : null
+            ),
+          ]);
+
+          if (metaResult.status === 'fulfilled' && metaResult.value) {
+            const meta = metaResult.value as {
+              title?: string;
+              authorName?: string;
+              authorUrl?: string;
+              description?: string;
+              durationSeconds?: number | null;
+              chapters?: VideoChapter[];
+            };
+            enriched = {
+              ...enriched,
+              title: meta.title || enriched.title,
+              authorName: meta.authorName || enriched.authorName,
+              authorUrl: meta.authorUrl || enriched.authorUrl,
+              description: meta.description || enriched.description,
+              durationSeconds: meta.durationSeconds ?? enriched.durationSeconds,
+              chapters: Array.isArray(meta.chapters) ? meta.chapters : enriched.chapters,
+            };
+          }
+
+          if (thumbResult.status === 'fulfilled' && thumbResult.value) {
+            await saveThumbnailBlob(ytId, thumbResult.value);
+            enriched = {...enriched, thumbCached: true};
+          }
+
+          setVideos((prev) =>
+            prev.map((v) =>
+              v.id === itemId
+                ? {
+                    ...v,
+                    title: enriched.title,
+                    authorName: enriched.authorName,
+                    authorUrl: enriched.authorUrl,
+                    description: enriched.description,
+                    durationSeconds: enriched.durationSeconds ?? v.durationSeconds,
+                    chapters: enriched.chapters ?? v.chapters,
+                    thumbCached: enriched.thumbCached || v.thumbCached,
+                  }
+                : v
+            )
+          );
+          await saveVideo(enriched);
+        }
+
+        refreshStats();
+      } finally {
+        capturingSuggestedIdsRef.current.delete(ytId);
+      }
+    },
+    [refreshStats]
+  );
+
+  const handleSaveAllSuggested = useCallback(
+    async (items: SuggestedVideoInput[]): Promise<number> => {
+      const existingIds = new Set(videosRef.current.map((v) => v.videoId));
+      const fresh = items.filter(
+        (item) => /^[a-zA-Z0-9_-]{11}$/.test(item.videoId) && !existingIds.has(item.videoId)
+      );
+      if (fresh.length === 0) return 0;
+
+      const collection = activeVideoRef.current?.collection || 'Watch Later';
+      const now = Date.now();
+      const created: VideoItem[] = fresh.map((item, idx) => ({
+        id: `${item.videoId}-${now}-${idx}`,
+        videoId: item.videoId,
+        originalUrl: `https://www.youtube.com/watch?v=${item.videoId}`,
+        title: item.title?.trim() || `YouTube Video (${item.videoId})`,
+        authorName: item.authorName?.trim() || 'YouTube Creator',
+        authorUrl: item.authorUrl || '',
+        description: '',
+        durationSeconds: item.durationSeconds ?? null,
+        collection,
+        addedAt: now + (fresh.length - idx),
+        lastWatchedAt: null,
+        lastPositionSeconds: 0,
+        playbackRate: 1,
+        bookmarks: [],
+        notes: '',
+        thumbCached: false,
+      }));
+
+      setVideos((prev) => {
+        const seen = new Set(prev.map((v) => v.videoId));
+        return [...created.filter((c) => !seen.has(c.videoId)), ...prev];
+      });
+      await saveVideosBulk(created);
+
+      setAutoSaveNotice(`Saved ${created.length} suggested video URLs to your Library!`);
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = setTimeout(() => setAutoSaveNotice(null), 4000);
+
+      if (navigator.onLine) {
+        Promise.all(
+          created.map(async (item) => {
+            try {
+              const tResp = await fetch(
+                `/api/youtube/thumbnail?videoId=${encodeURIComponent(item.videoId)}`
+              );
+              if (tResp.ok) {
+                const blob = await tResp.blob();
+                await saveThumbnailBlob(item.videoId, blob);
+                return item.id;
+              }
+            } catch {
+              // Ignore thumbnail errors on bulk save
+            }
+            return null;
+          })
+        ).then(async (cachedIds) => {
+          const idSet = new Set(cachedIds.filter(Boolean) as string[]);
+          if (idSet.size > 0) {
+            setVideos((prev) =>
+              prev.map((v) => (idSet.has(v.id) ? {...v, thumbCached: true} : v))
+            );
+            const updatedItems = created
+              .filter((c) => idSet.has(c.id))
+              .map((c) => ({...c, thumbCached: true}));
+            await saveVideosBulk(updatedItems);
+          }
+          refreshStats();
+        });
+      } else {
+        refreshStats();
+      }
+
+      return created.length;
+    },
+    [refreshStats]
   );
 
   const handleUpdateVideo = useCallback(async (updated: VideoItem) => {
@@ -459,7 +795,7 @@ export default function App() {
 
       {/* Clean Three-Zone Top Bar */}
       <header className="sticky top-0 z-30 h-[52px] md:h-16 border-b border-slate-200 dark:border-[#1E2430] bg-white/90 dark:bg-[#0B0D11]/90 backdrop-blur-md">
-        <div className="max-w-[1440px] mx-auto h-full px-4 sm:px-6 flex items-center justify-between gap-8">
+        <div className="max-w-[1440px] mx-auto h-full px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-6">
           <button
             type="button"
             onClick={() => {
@@ -496,7 +832,40 @@ export default function App() {
             })}
           </nav>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowSuggestionsModal(true)}
+              title="View all auto-fetched suggested video URLs"
+              className={`min-h-[36px] px-2.5 sm:px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                showSuggestionsModal
+                  ? 'border-rose-600 bg-rose-600 text-white'
+                  : 'border-slate-200 dark:border-[#242A38] bg-slate-50 dark:bg-[#13161D] text-slate-800 dark:text-slate-100 hover:border-rose-500/70'
+              }`}
+            >
+              {autoSuggestionsLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-500 shrink-0" />
+              ) : (
+                <Compass
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    showSuggestionsModal ? 'text-white' : 'text-rose-500'
+                  }`}
+                />
+              )}
+              <span>Suggestion</span>
+              {autoSuggestions.length > 0 && (
+                <span
+                  className={`px-1.5 py-0.2 rounded font-mono text-[10px] font-bold tabular-nums ${
+                    showSuggestionsModal
+                      ? 'bg-white/20 text-white'
+                      : 'bg-rose-600/15 text-rose-600 dark:text-rose-400'
+                  }`}
+                >
+                  {autoSuggestions.length}
+                </span>
+              )}
+            </button>
+
             <PWAInstallButton />
             <button
               type="button"
@@ -510,7 +879,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-5 pb-28 md:pb-24">
+      <main className="flex-1 w-full max-w-[1440px] mx-auto px-2.5 sm:px-6 py-4 sm:py-5 pb-28 md:pb-24">
         {loading ? (
           <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-12 text-center text-sm text-slate-500">
             Loading your TubeVault feed...
@@ -530,6 +899,7 @@ export default function App() {
             activeInlineKey={activeInlineKey}
             onPlayInline={handlePlayInline}
             onStopInline={handleStopInline}
+            onCaptureSuggestedVideo={(s) => handleCaptureSuggestedVideo(s, false)}
             initialQuery={discoverInitialQuery}
             onAdded={handleAddedVideos}
             onPlayExisting={handlePlayExistingByYtId}
@@ -647,6 +1017,7 @@ export default function App() {
                 keyPrefix="home"
                 onPlayInline={handlePlayInline}
                 onStopInline={handleStopInline}
+                onCaptureSuggestedVideo={(s) => handleCaptureSuggestedVideo(s, false)}
                 onSelectVideo={handleSelectVideo}
                 onMoveVideo={handleMoveVideo}
                 onPlayNext={handlePlayNext}
@@ -716,6 +1087,13 @@ export default function App() {
                     autoPlaySignal={autoPlaySignal}
                     pauseSignal={pauseStageSignal}
                     onPlaybackStarted={handleStagePlaybackStarted}
+                    onCaptureSuggestedVideo={handleCaptureSuggestedVideo}
+                    onSaveAllSuggested={handleSaveAllSuggested}
+                    sharedRelatedVideos={autoSuggestions}
+                    sharedRelatedLoading={autoSuggestionsLoading}
+                    sharedRelatedForVideoId={suggestionSource?.videoId ?? null}
+                    existingVideoIds={existingVideoIds}
+                    autoSaveNotice={autoSaveNotice}
                     isOnline={isOnline}
                     isMini={false}
                     theaterMode={theaterMode}
@@ -742,6 +1120,8 @@ export default function App() {
                   autoPlaySignal={autoPlaySignal}
                   pauseSignal={pauseStageSignal}
                   onPlaybackStarted={handleStagePlaybackStarted}
+                  onCaptureSuggestedVideo={handleCaptureSuggestedVideo}
+                  existingVideoIds={existingVideoIds}
                   isOnline={isOnline}
                   isMini={true}
                   theaterMode={false}
@@ -779,6 +1159,7 @@ export default function App() {
                   keyPrefix="queue"
                   onPlayInline={handlePlayInline}
                   onStopInline={handleStopInline}
+                  onCaptureSuggestedVideo={(s) => handleCaptureSuggestedVideo(s, false)}
                   onSelectVideo={handleSelectVideo}
                   onMoveVideo={handleMoveVideo}
                   onPlayNext={handlePlayNext}
@@ -914,6 +1295,20 @@ export default function App() {
             setActiveView('discover');
           }}
           onClose={() => setShowQuickAddHub(false)}
+        />
+      )}
+
+      {/* Top Nav 'Suggestion' Drawer Modal showing ALL auto-fetched URLs */}
+      {showSuggestionsModal && (
+        <SuggestionsDrawerModal
+          sourceVideo={suggestionSource}
+          suggestions={autoSuggestions}
+          loading={autoSuggestionsLoading}
+          isOnline={isOnline}
+          existingVideoIds={existingVideoIds}
+          onPlaySuggestion={(suggested) => handleCaptureSuggestedVideo(suggested, true)}
+          onSaveAll={handleSaveAllSuggested}
+          onClose={() => setShowSuggestionsModal(false)}
         />
       )}
     </div>

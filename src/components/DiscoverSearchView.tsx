@@ -13,7 +13,7 @@ import {
   WifiOff,
 } from 'lucide-react';
 import {saveThumbnailBlob, saveVideosBulk} from '../lib/offlineDb';
-import type {VideoChapter, VideoItem} from '../types/video';
+import type {SuggestedVideoInput, VideoChapter, VideoItem} from '../types/video';
 import {CachedThumbnail} from './CachedThumbnail';
 import {InlineCardPlayer} from './InlineCardPlayer';
 
@@ -48,8 +48,9 @@ interface DiscoverSearchViewProps {
   collections: string[];
   isOnline: boolean;
   activeInlineKey: string | null;
-  onPlayInline: (key: string) => void;
+  onPlayInline: (key: string, titleHint?: string) => void;
   onStopInline: () => void;
+  onCaptureSuggestedVideo?: (suggested: SuggestedVideoInput) => void;
   initialQuery?: string;
   onAdded: (items: VideoItem[], stayInPlace?: boolean) => void;
   onPlayExisting?: (videoId: string) => void;
@@ -70,6 +71,7 @@ export const DiscoverSearchView: React.FC<DiscoverSearchViewProps> = ({
   activeInlineKey,
   onPlayInline,
   onStopInline,
+  onCaptureSuggestedVideo,
   initialQuery,
   onAdded,
   onPlayExisting,
@@ -639,7 +641,7 @@ export const DiscoverSearchView: React.FC<DiscoverSearchViewProps> = ({
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {results.map((item) => {
               const inlineKey = `discover:${item.videoId}`;
               const alreadyAdded = existingVideoIds.has(item.videoId);
@@ -654,20 +656,21 @@ export const DiscoverSearchView: React.FC<DiscoverSearchViewProps> = ({
                       : 'border-slate-200 dark:border-[#1E2430]'
                   }`}
                 >
-                  <div className="relative aspect-video bg-black overflow-hidden">
+                  <div className="relative w-full aspect-video bg-black overflow-hidden">
                     {isInlinePlaying ? (
                       <InlineCardPlayer
                         videoId={item.videoId}
                         title={item.title}
                         isOnline={isOnline}
                         onStop={onStopInline}
-                        onPlayStarted={() => onPlayInline(inlineKey)}
+                        onPlayStarted={() => onPlayInline(inlineKey, item.title)}
+                        onCaptureSuggestedVideo={onCaptureSuggestedVideo}
                       />
                     ) : (
                       <>
                         <button
                           type="button"
-                          onClick={() => onPlayInline(inlineKey)}
+                          onClick={() => onPlayInline(inlineKey, item.title)}
                           aria-label={`Preview ${item.title} inline`}
                           className="relative w-full h-full block cursor-pointer group"
                         >
@@ -675,7 +678,7 @@ export const DiscoverSearchView: React.FC<DiscoverSearchViewProps> = ({
                             videoId={item.videoId}
                             alt={item.title}
                             isOnline={isOnline}
-                            fit="contain"
+                            fit="cover"
                             className="w-full h-full group-hover:scale-[1.02] transition-transform duration-200"
                           />
                           <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-transparent to-transparent" />

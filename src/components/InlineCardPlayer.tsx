@@ -1,10 +1,12 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {ExternalLink, WifiOff, X} from 'lucide-react';
+import type {SuggestedVideoInput} from '../types/video';
 import {CachedThumbnail} from './CachedThumbnail';
 
 interface YTPlayerLite {
   playVideo: () => void;
   destroy: () => void;
+  getVideoData?: () => {video_id?: string; title?: string; author?: string};
 }
 
 interface InlineCardPlayerProps {
@@ -13,6 +15,7 @@ interface InlineCardPlayerProps {
   isOnline: boolean;
   onStop: () => void;
   onPlayStarted?: () => void;
+  onCaptureSuggestedVideo?: (suggested: SuggestedVideoInput) => void;
   compact?: boolean;
 }
 
@@ -25,25 +28,31 @@ export const InlineCardPlayer: React.FC<InlineCardPlayerProps> = ({
   isOnline,
   onStop,
   onPlayStarted,
+  onCaptureSuggestedVideo,
   compact = false,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<YTPlayerLite | null>(null);
+  const currentYtIdRef = useRef(videoId);
   const onPlayStartedRef = useRef(onPlayStarted);
   onPlayStartedRef.current = onPlayStarted;
+  const onCaptureSuggestedRef = useRef(onCaptureSuggestedVideo);
+  onCaptureSuggestedRef.current = onCaptureSuggestedVideo;
 
   const [embedError, setEmbedError] = useState<string | null>(null);
-  const [containerWidth, setContainerWidth] = useState<number>(0);
+  const [boxSize, setBoxSize] = useState<{width: number; height: number}>({width: 0, height: 0});
 
-  // Measure card box width so small cards proportionally scale down the full 16:9 YouTube player
+  // Measure card box dimensions so ultra-narrow boxes scale proportionally, while taller/standard cards fill cleanly
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
     const updateSize = () => {
       const rect = el.getBoundingClientRect();
-      if (rect.width > 0) setContainerWidth(rect.width);
+      if (rect.width > 0 && rect.height > 0) {
+        setBoxSize({width: rect.width, height: rect.height});
+      }
     };
 
     updateSize();
@@ -57,7 +66,26 @@ export const InlineCardPlayer: React.FC<InlineCardPlayerProps> = ({
     if (!isOnline) return;
 
     let cancelled = false;
+    currentYtIdRef.current = videoId;
     setEmbedError(null);
+
+    const checkIframeVideoChange = (target: YTPlayerLite | null) => {
+      if (cancelled || !target?.getVideoData) return;
+      try {
+        const data = target.getVideoData();
+        const nextId = data?.video_id?.trim();
+        if (nextId && /^[a-zA-Z0-9_-]{11}$/.test(nextId) && nextId !== currentYtIdRef.current) {
+          currentYtIdRef.current = nextId;
+          onCaptureSuggestedRef.current?.({
+            videoId: nextId,
+            title: data.title,
+            authorName: data.author,
+          });
+        }
+      } catch {
+        // Ignore cross-origin timing edge
+      }
+    };
 
     const mountPlayer = () => {
       if (cancelled || !hostRef.current || !window.YT?.Player) return;
@@ -99,8 +127,10 @@ export const InlineCardPlayer: React.FC<InlineCardPlayerProps> = ({
               }
             }
           },
-          onStateChange: (e: {data: number}) => {
-            if (!cancelled && e.data === 1) {
+          onStateChange: (e: {data: number; target: YTPlayerLite}) => {
+            if (cancelled) return;
+            checkIframeVideoChange(e.target);
+            if (e.data === 1) {
               onPlayStartedRef.current?.();
             }
           },
@@ -134,8 +164,13 @@ export const InlineCardPlayer: React.FC<InlineCardPlayerProps> = ({
       };
     }
 
+    const pollInterval = setInterval(() => {
+      checkIframeVideoChange(playerRef.current);
+    }, 1000);
+
     return () => {
       cancelled = true;
+      clearInterval(pollInterval);
       if (playerRef.current) {
         try {
           playerRef.current.destroy();
@@ -147,11 +182,16 @@ export const InlineCardPlayer: React.FC<InlineCardPlayerProps> = ({
     };
   }, [videoId, isOnline]);
 
-  const shouldScaleDown = containerWidth > 0 && containerWidth < 440;
-  const scaleRatio = shouldScaleDown ? containerWidth / VIRTUAL_STAGE_W : 1;
+  const shouldScaleDown = boxSize.width > 0 && boxSize.width < 300;
+  const scaleRatio = shouldScaleDown
+    ? Math.min(boxSize.width / VIRTUAL_STAGE_W, boxSize.height / VIRTUAL_STAGE_H)
+    : 1;
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-black overflow-hidden">
+    <div
+      ref={containerRef}
+      className="relative w-full h-full bg-black overflow-hidden flex items-center justify-center"
+    >
       {!isOnline ? (
         <div className="relative w-full h-full flex flex-col items-center justify-center p-2 text-center text-white">
           <CachedThumbnail
@@ -181,24 +221,29 @@ export const InlineCardPlayer: React.FC<InlineCardPlayerProps> = ({
             <ExternalLink className="w-2.5 h-2.5" />
           </a>
         </div>
-      ) : (
+      ) : shouldScaleDown ? (
         <div
-          ref={hostRef}
-          style={
-            shouldScaleDown
-              ? {
-                  width: `${VIRTUAL_STAGE_W}px`,
-                  height: `${VIRTUAL_STAGE_H}px`,
-                  transform: `scale(${scaleRatio})`,
-                  transformOrigin: 'top left',
-                }
-              : undefined
-          }
-          className={shouldScaleDown ? 'bg-black' : 'w-full h-full bg-black'}
-        />
+          style={{
+            width: `${VIRTUAL_STAGE_W * scaleRatio}px`,
+            height: `${VIRTUAL_STAGE_H * scaleRatio}px`,
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            ref={hostRef}
+            style={{
+              width: `${VIRTUAL_STAGE_W}px`,
+              height: `${VIRTUAL_STAGE_H}px`,
+              transform: `scale(${scaleRatio})`,
+              transformOrigin: 'top left',
+            }}
+            className="bg-black"
+          />
+        </div>
+      ) : (
+        <div ref={hostRef} className="w-full h-full bg-black" />
       )}
 
-      {/* Clean Stop Overlay Control (Full button removed per user request) */}
       <div className="absolute top-1.5 right-1.5 z-20 flex items-center">
         <button
           type="button"

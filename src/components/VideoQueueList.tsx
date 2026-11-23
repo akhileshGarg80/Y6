@@ -9,7 +9,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import {formatDuration, formatRelativeDate} from '../lib/youtube';
-import type {VideoItem} from '../types/video';
+import type {SuggestedVideoInput, VideoItem} from '../types/video';
 import {CachedThumbnail} from './CachedThumbnail';
 import {InlineCardPlayer} from './InlineCardPlayer';
 
@@ -22,6 +22,7 @@ interface VideoQueueListProps {
   keyPrefix: string;
   onPlayInline: (key: string) => void;
   onStopInline: () => void;
+  onCaptureSuggestedVideo?: (suggested: SuggestedVideoInput) => void;
   onSelectVideo: (id: string) => void;
   onMoveVideo: (id: string, direction: 'up' | 'down') => void;
   onPlayNext?: (id: string) => void;
@@ -38,6 +39,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
   keyPrefix,
   onPlayInline,
   onStopInline,
+  onCaptureSuggestedVideo,
   onSelectVideo,
   onMoveVideo,
   onPlayNext,
@@ -50,6 +52,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
     'all'
   );
   const [sortBy, setSortBy] = useState<'queue' | 'recent' | 'duration' | 'title'>('queue');
+  const [cardSize, setCardSize] = useState<'large' | 'cinema'>('large');
 
   const filtered = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -122,6 +125,31 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
 
           {layout === 'grid' && (
             <>
+              <div className="hidden lg:flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-[#13161D] border border-slate-200 dark:border-[#1E2430]">
+                <button
+                  type="button"
+                  onClick={() => setCardSize('large')}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    cardSize === 'large'
+                      ? 'bg-white dark:bg-[#1E2430] text-slate-900 dark:text-white shadow-sm'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  2-Col
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCardSize('cinema')}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    cardSize === 'cinema'
+                      ? 'bg-white dark:bg-[#1E2430] text-slate-900 dark:text-white shadow-sm'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Big 1-Col
+                </button>
+              </div>
+
               <select
                 aria-label="Filter by collection"
                 value={activeCollection}
@@ -161,7 +189,13 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
           </p>
         </div>
       ) : layout === 'grid' ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+        <div
+          className={
+            cardSize === 'cinema'
+              ? 'grid grid-cols-1 max-w-5xl mx-auto gap-7'
+              : 'grid grid-cols-1 lg:grid-cols-2 gap-6'
+          }
+        >
           {filtered.map((item) => {
             const inlineKey = `${keyPrefix}:${item.id}`;
             const isActive = item.id === activeVideoId;
@@ -180,7 +214,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                     : 'border-slate-200 dark:border-[#1E2430] hover:border-slate-300 dark:hover:border-[#2C3446]'
                 }`}
               >
-                {/* Full-fit 16:9 Media Box — scales full video cleanly without cropping */}
+                {/* Edge-to-edge 16:9 Large Video Box — zero empty black bars */}
                 <div className="relative w-full aspect-video bg-black overflow-hidden">
                   {isInlinePlaying ? (
                     <InlineCardPlayer
@@ -189,6 +223,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                       isOnline={isOnline}
                       onStop={onStopInline}
                       onPlayStarted={() => onPlayInline(inlineKey)}
+                      onCaptureSuggestedVideo={onCaptureSuggestedVideo}
                     />
                   ) : (
                     <button
@@ -201,14 +236,14 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                         videoId={item.videoId}
                         alt={item.title}
                         isOnline={isOnline}
-                        fit="contain"
+                        fit="cover"
                         className="w-full h-full transition-transform duration-200 group-hover:scale-[1.02]"
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/10 to-transparent opacity-80 group-hover:opacity-100 transition-opacity" />
 
                       <span className="absolute inset-0 flex items-center justify-center">
-                        <span className="w-11 h-11 rounded-full bg-black/75 border border-white/20 text-white flex items-center justify-center opacity-90 group-hover:bg-rose-600 group-hover:border-rose-500 group-hover:scale-105 transition-all shadow-lg">
-                          <Play className="w-4 h-4 fill-current ml-0.5" />
+                        <span className="w-12 h-12 rounded-full bg-black/75 border border-white/20 text-white flex items-center justify-center opacity-90 group-hover:bg-rose-600 group-hover:border-rose-500 group-hover:scale-105 transition-all shadow-lg">
+                          <Play className="w-5 h-5 fill-current ml-0.5" />
                         </span>
                       </span>
 
@@ -234,13 +269,13 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                       onClick={() => handleSelectTitle(item.id)}
                       className="text-left w-full cursor-pointer"
                     >
-                      <h3 className="text-sm font-semibold text-slate-900 dark:text-white line-clamp-2 leading-snug hover:text-rose-600 dark:hover:text-rose-400 transition-colors">
+                      <h3 className="text-base font-semibold text-slate-900 dark:text-white line-clamp-2 leading-snug hover:text-rose-600 dark:hover:text-rose-400 transition-colors">
                         {item.title}
                       </h3>
                     </button>
 
                     <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-                      <span className="truncate max-w-[140px]">{item.authorName}</span>
+                      <span className="truncate max-w-[160px]">{item.authorName}</span>
                       <span aria-hidden="true">·</span>
                       <span>{item.collection}</span>
                       <span aria-hidden="true">·</span>
@@ -290,7 +325,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
           })}
         </div>
       ) : (
-        /* Sidebar Queue: expands card cleanly to full width when playing inline */
+        /* Sidebar Queue: expands card cleanly with taller player height when playing inline */
         <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] divide-y divide-slate-100 dark:divide-[#1E2430] overflow-hidden">
           {filtered.map((item, idx) => {
             const inlineKey = `${keyPrefix}:${item.id}`;
@@ -314,7 +349,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
               >
                 <div
                   className={`relative rounded-xl overflow-hidden bg-black shrink-0 transition-all ${
-                    isInlinePlaying ? 'w-full aspect-video' : 'w-32 aspect-video'
+                    isInlinePlaying ? 'w-full aspect-video' : 'w-36 aspect-video'
                   }`}
                 >
                   {isInlinePlaying ? (
@@ -325,6 +360,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                       compact
                       onStop={onStopInline}
                       onPlayStarted={() => onPlayInline(inlineKey)}
+                      onCaptureSuggestedVideo={onCaptureSuggestedVideo}
                     />
                   ) : (
                     <button
@@ -337,7 +373,7 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                         videoId={item.videoId}
                         alt={item.title}
                         isOnline={isOnline}
-                        fit="contain"
+                        fit="cover"
                         className="w-full h-full"
                       />
                       <div className="absolute inset-0 bg-black/25 group-hover:bg-black/40 transition-colors flex items-center justify-center">

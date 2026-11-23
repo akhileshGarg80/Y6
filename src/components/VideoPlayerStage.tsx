@@ -2,16 +2,23 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   BookmarkPlus,
   Check,
+  CheckCircle2,
+  ClipboardPaste,
   Clock,
+  Compass,
+  Copy,
   Download,
   ExternalLink,
   Eye,
   FileText,
+  Link2,
   ListTree,
+  Loader2,
   Maximize2,
   Minimize2,
   Pause,
   Play,
+  Plus,
   Repeat,
   RotateCcw,
   RotateCw,
@@ -24,16 +31,26 @@ import {
   X,
 } from 'lucide-react';
 import {getThumbnailBlob} from '../lib/offlineDb';
-import {formatDuration} from '../lib/youtube';
-import type {VideoBookmark, VideoChapter, VideoItem} from '../types/video';
+import {extractVideoIdFromUrl, formatDuration} from '../lib/youtube';
+import type {
+  RelatedVideoItem,
+  SuggestedVideoInput,
+  VideoBookmark,
+  VideoChapter,
+  VideoItem,
+} from '../types/video';
 import {CachedThumbnail} from './CachedThumbnail';
 
 interface YTPlayerInstance {
   playVideo: () => void;
   pauseVideo: () => void;
   seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+  loadVideoById?: (
+    videoIdOrOptions: string | {videoId: string; startSeconds?: number}
+  ) => void;
   getCurrentTime: () => number;
   getDuration: () => number;
+  getVideoData?: () => {video_id?: string; title?: string; author?: string};
   setPlaybackRate: (rate: number) => void;
   mute: () => void;
   unMute: () => void;
@@ -67,6 +84,13 @@ interface VideoPlayerStageProps {
   autoPlaySignal: number;
   pauseSignal?: number;
   onPlaybackStarted?: () => void;
+  onCaptureSuggestedVideo?: (suggested: SuggestedVideoInput, playInStage?: boolean) => void;
+  onSaveAllSuggested?: (items: SuggestedVideoInput[]) => Promise<number>;
+  sharedRelatedVideos?: RelatedVideoItem[];
+  sharedRelatedLoading?: boolean;
+  sharedRelatedForVideoId?: string | null;
+  existingVideoIds?: Set<string>;
+  autoSaveNotice?: string | null;
   isOnline: boolean;
   isMini: boolean;
   theaterMode: boolean;
@@ -91,6 +115,13 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   autoPlaySignal,
   pauseSignal = 0,
   onPlaybackStarted,
+  onCaptureSuggestedVideo,
+  onSaveAllSuggested,
+  sharedRelatedVideos,
+  sharedRelatedLoading,
+  sharedRelatedForVideoId,
+  existingVideoIds,
+  autoSaveNotice,
   isOnline,
   isMini,
   theaterMode,
@@ -107,6 +138,8 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 }) => {
   const ytHostRef = useRef<HTMLDivElement | null>(null);
   const ytPlayerRef = useRef<YTPlayerInstance | null>(null);
+  const playerReadyRef = useRef(false);
+  const iframeLoadedVideoIdRef = useRef<string | null>(null);
   const playerViewportRef = useRef<HTMLDivElement | null>(null);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
 
@@ -134,6 +167,24 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
   const [embedError, setEmbedError] = useState<string | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
 
+  const [localRelatedVideos, setLocalRelatedVideos] = useState<RelatedVideoItem[]>([]);
+  const [localRelatedLoading, setLocalRelatedLoading] = useState(false);
+  const usingSharedRelated =
+    sharedRelatedForVideoId === video.videoId && sharedRelatedVideos !== undefined;
+  const relatedVideos = usingSharedRelated ? sharedRelatedVideos : localRelatedVideos;
+  const relatedLoading = usingSharedRelated
+    ? Boolean(sharedRelatedLoading)
+    : localRelatedLoading;
+  const [isEnded, setIsEnded] = useState(false);
+  const [showAllUrlsDrawer, setShowAllUrlsDrawer] = useState(false);
+  const [showAllRelatedGrid, setShowAllRelatedGrid] = useState(false);
+  const [copiedAllUrls, setCopiedAllUrls] = useState(false);
+  const [copiedSingleId, setCopiedSingleId] = useState<string | null>(null);
+  const [savingAllRelated, setSavingAllRelated] = useState(false);
+  const [pasteBoxOpen, setPasteBoxOpen] = useState(false);
+  const [pasteUrlValue, setPasteUrlValue] = useState('');
+  const [pasteError, setPasteError] = useState<string | null>(null);
+
   const latestVideoRef = useRef(video);
   latestVideoRef.current = video;
 
@@ -148,6 +199,15 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
   const onPlaybackStartedRef = useRef(onPlaybackStarted);
   onPlaybackStartedRef.current = onPlaybackStarted;
+
+  const onCaptureSuggestedRef = useRef(onCaptureSuggestedVideo);
+  onCaptureSuggestedRef.current = onCaptureSuggestedVideo;
+
+  const hasNextRef = useRef(hasNext);
+  hasNextRef.current = hasNext;
+
+  const onNextVideoRef = useRef(onNextVideo);
+  onNextVideoRef.current = onNextVideo;
 
   useEffect(() => {
     const el = playerViewportRef.current;
@@ -226,6 +286,9 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     setLoopB(null);
     setLoopActive(false);
     setEmbedError(null);
+    setIsEnded(false);
+    setShowAllRelatedGrid(false);
+    setCopiedAllUrls(false);
   }, [video.id]);
 
   // Global single-playback lock: pause stage immediately when an inline card starts playing
@@ -271,9 +334,56 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     return () => clearInterval(interval);
   }, [sleepMode]);
 
-  // Initialize YouTube IFrame Player API
+  // Fetch real YouTube Suggested Videos if not already lifted/provided by App.tsx
+  useEffect(() => {
+    if (isMini || !isOnline || usingSharedRelated) {
+      if (!usingSharedRelated) {
+        setLocalRelatedVideos([]);
+      }
+      return;
+    }
+
+    let active = true;
+    setLocalRelatedLoading(true);
+    fetch(`/api/youtube/related?videoId=${encodeURIComponent(video.videoId)}`)
+      .then((resp) => (resp.ok ? resp.json() : null))
+      .then((data: {related?: RelatedVideoItem[]} | null) => {
+        if (!active) return;
+        setLocalRelatedVideos(Array.isArray(data?.related) ? data.related : []);
+      })
+      .catch(() => {
+        if (active) setLocalRelatedVideos([]);
+      })
+      .finally(() => {
+        if (active) setLocalRelatedLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [video.videoId, isMini, isOnline, usingSharedRelated]);
+
+  // Destroy YouTube player cleanly on unmount or when embed error occurs
+  useEffect(() => {
+    return () => {
+      playerReadyRef.current = false;
+      iframeLoadedVideoIdRef.current = null;
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.destroy();
+        } catch {
+          // Ignore
+        }
+        ytPlayerRef.current = null;
+      }
+    };
+  }, []);
+
+  // Initialize or smoothly reuse YouTube IFrame Player API
   useEffect(() => {
     if (!isOnline) {
+      playerReadyRef.current = false;
+      iframeLoadedVideoIdRef.current = null;
       if (ytPlayerRef.current) {
         try {
           ytPlayerRef.current.destroy();
@@ -285,7 +395,60 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
       return;
     }
 
+    // If the user clicked a suggested video directly INSIDE YouTube's iframe,
+    // our auto-capture updated activeVideoId to match the video already playing inside ytPlayerRef!
+    // Do NOT reload or interrupt the iframe!
+    if (ytPlayerRef.current && iframeLoadedVideoIdRef.current === video.videoId && !embedError) {
+      return;
+    }
+
+    // Fast path: swap video inside already-warm iframe when possible
+    if (
+      ytPlayerRef.current &&
+      playerReadyRef.current &&
+      typeof ytPlayerRef.current.loadVideoById === 'function' &&
+      !embedError
+    ) {
+      try {
+        iframeLoadedVideoIdRef.current = video.videoId;
+        ytPlayerRef.current.loadVideoById({
+          videoId: video.videoId,
+          startSeconds: Math.floor(video.lastPositionSeconds || 0),
+        });
+        ytPlayerRef.current.setPlaybackRate(video.playbackRate || 1);
+        return;
+      } catch {
+        // Fall through to full player creation
+      }
+    }
+
     let cancelled = false;
+
+    const handleIframeSuggestionCheck = (target: YTPlayerInstance | null) => {
+      if (cancelled || !target?.getVideoData) return;
+      try {
+        const vData = target.getVideoData();
+        const nextYtId = vData?.video_id?.trim();
+        if (
+          nextYtId &&
+          /^[a-zA-Z0-9_-]{11}$/.test(nextYtId) &&
+          iframeLoadedVideoIdRef.current &&
+          nextYtId !== iframeLoadedVideoIdRef.current
+        ) {
+          iframeLoadedVideoIdRef.current = nextYtId;
+          onCaptureSuggestedRef.current?.(
+            {
+              videoId: nextYtId,
+              title: vData.title,
+              authorName: vData.author,
+            },
+            true
+          );
+        }
+      } catch {
+        // Ignore cross-origin timing edge
+      }
+    };
 
     const createPlayer = () => {
       if (cancelled || !ytHostRef.current || !window.YT?.Player) return;
@@ -297,6 +460,8 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
         }
       }
 
+      playerReadyRef.current = false;
+      iframeLoadedVideoIdRef.current = video.videoId;
       ytHostRef.current.innerHTML = '';
       const mountNode = document.createElement('div');
       ytHostRef.current.appendChild(mountNode);
@@ -316,6 +481,7 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
         events: {
           onReady: (event) => {
             if (cancelled) return;
+            playerReadyRef.current = true;
             const p = event.target;
             try {
               p.setPlaybackRate(latestVideoRef.current.playbackRate || 1);
@@ -330,24 +496,30 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
           },
           onStateChange: (event) => {
             if (cancelled) return;
+            handleIframeSuggestionCheck(event.target);
             const state = event.data;
             const playingNow = state === 1;
             setIsPlaying(playingNow);
+            if (state === 1 || state === 3) {
+              setIsEnded(false);
+            }
             if (playingNow) {
               setSleepNotice(null);
               onPlaybackStartedRef.current?.();
             }
             if (state === 0) {
+              setIsEnded(true);
               if (sleepModeRef.current === 'end') {
                 setSleepMode('off');
                 setSleepNotice('Sleep timer ended playback after this video.');
-              } else if (autoNextRef.current && hasNext) {
-                onNextVideo();
+              } else if (autoNextRef.current && hasNextRef.current) {
+                onNextVideoRef.current();
               }
             }
           },
           onError: (event) => {
             if (cancelled) return;
+            playerReadyRef.current = false;
             if (event.data === 101 || event.data === 150) {
               setEmbedError('Playback on external sites has been disabled by the video owner.');
             } else if (event.data === 100) {
@@ -378,16 +550,8 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
 
     return () => {
       cancelled = true;
-      if (ytPlayerRef.current) {
-        try {
-          ytPlayerRef.current.destroy();
-        } catch {
-          // Ignore
-        }
-        ytPlayerRef.current = null;
-      }
     };
-  }, [video.videoId, isOnline, hasNext, onNextVideo]);
+  }, [video.videoId, isOnline, embedError]);
 
   useEffect(() => {
     if (autoPlaySignal === 0) return;
@@ -412,17 +576,45 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     }
   }, []);
 
-  // Poll playback position for progress scrubber, resume persistence & A-B loop
+  // Poll playback position & detect in-iframe suggested video transitions
   useEffect(() => {
     const interval = setInterval(() => {
-      if (!ytPlayerRef.current || typeof ytPlayerRef.current.getCurrentTime !== 'function') {
+      const p = ytPlayerRef.current;
+      if (!p || typeof p.getCurrentTime !== 'function') {
         return;
       }
+
+      if (typeof p.getVideoData === 'function') {
+        try {
+          const vData = p.getVideoData();
+          const nextYtId = vData?.video_id?.trim();
+          if (
+            nextYtId &&
+            /^[a-zA-Z0-9_-]{11}$/.test(nextYtId) &&
+            iframeLoadedVideoIdRef.current &&
+            nextYtId !== iframeLoadedVideoIdRef.current
+          ) {
+            iframeLoadedVideoIdRef.current = nextYtId;
+            onCaptureSuggestedRef.current?.(
+              {
+                videoId: nextYtId,
+                title: vData.title,
+                authorName: vData.author,
+              },
+              true
+            );
+            return;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
       let time = currentTime;
       let dur = duration;
       try {
-        time = ytPlayerRef.current.getCurrentTime();
-        const d = ytPlayerRef.current.getDuration();
+        time = p.getCurrentTime();
+        const d = p.getDuration();
         if (d > 0) dur = d;
       } catch {
         return;
@@ -592,6 +784,103 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     URL.revokeObjectURL(url);
   }
 
+  async function handleCopyText(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Fallback below
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function handleCopyAllSuggestedUrls() {
+    if (relatedVideos.length === 0) return;
+    const allText = relatedVideos.map((v) => v.watchUrl).join('\n');
+    const ok = await handleCopyText(allText);
+    if (ok) {
+      setCopiedAllUrls(true);
+      setTimeout(() => setCopiedAllUrls(false), 2600);
+    } else {
+      setShowAllUrlsDrawer(true);
+    }
+  }
+
+  async function handleCopySingleSuggestedUrl(videoId: string, watchUrl: string) {
+    const ok = await handleCopyText(watchUrl);
+    if (ok) {
+      setCopiedSingleId(videoId);
+      setTimeout(() => setCopiedSingleId((prev) => (prev === videoId ? null : prev)), 2000);
+    } else {
+      setShowAllUrlsDrawer(true);
+    }
+  }
+
+  async function handleSaveAllSuggestedClick() {
+    if (!onSaveAllSuggested || relatedVideos.length === 0 || savingAllRelated) return;
+    setSavingAllRelated(true);
+    try {
+      await onSaveAllSuggested(
+        relatedVideos.map((v) => ({
+          videoId: v.videoId,
+          title: v.title,
+          authorName: v.authorName,
+          authorUrl: v.authorUrl,
+          durationSeconds: v.durationSeconds,
+        }))
+      );
+    } finally {
+      setSavingAllRelated(false);
+    }
+  }
+
+  async function handlePasteAndPlayClick() {
+    setPasteError(null);
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = (await navigator.clipboard.readText()).trim();
+        const extracted = extractVideoIdFromUrl(text);
+        if (extracted) {
+          onCaptureSuggestedVideo?.({videoId: extracted}, true);
+          setPasteBoxOpen(false);
+          setPasteUrlValue('');
+          return;
+        }
+      }
+    } catch {
+      // Clipboard read denied by iframe/browser policy — open inline paste box
+    }
+    setPasteBoxOpen((prev) => !prev);
+  }
+
+  function handleSubmitPasteUrl(e: React.FormEvent) {
+    e.preventDefault();
+    const extracted = extractVideoIdFromUrl(pasteUrlValue.trim());
+    if (!extracted) {
+      setPasteError('Valid YouTube URL paste karein (youtube.com / youtu.be)');
+      return;
+    }
+    setPasteError(null);
+    setPasteUrlValue('');
+    setPasteBoxOpen(false);
+    onCaptureSuggestedVideo?.({videoId: extracted}, true);
+  }
+
   function handleScrubClick(e: React.MouseEvent<HTMLDivElement>) {
     if (!scrubberRef.current || duration <= 0) return;
     const rect = scrubberRef.current.getBoundingClientRect();
@@ -710,6 +999,91 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
                   </p>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* In-App End-Screen Suggestions Overlay (replaces YouTube's external end-screen links) */}
+          {!isMini && isOnline && isEnded && !embedError && relatedVideos.length > 0 && (
+            <div className="absolute inset-0 z-20 bg-black/90 backdrop-blur-md p-3 sm:p-5 flex flex-col justify-between overflow-y-auto">
+              <div className="flex items-center justify-between gap-2 pb-2">
+                <div className="flex items-center gap-2 text-white">
+                  <Compass className="w-4 h-4 text-rose-500 shrink-0" />
+                  <span className="text-xs sm:text-sm font-semibold">
+                    Up Next Suggestions (Plays Inside TubeVault)
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEnded(false);
+                      seekTo(0);
+                      ytPlayerRef.current?.playVideo();
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-medium inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Replay</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsEnded(false)}
+                    aria-label="Close end-screen suggestions"
+                    className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 my-auto">
+                {relatedVideos.slice(0, 6).map((item) => (
+                  <button
+                    key={item.videoId}
+                    type="button"
+                    onClick={() => {
+                      setIsEnded(false);
+                      onCaptureSuggestedVideo?.(
+                        {
+                          videoId: item.videoId,
+                          title: item.title,
+                          authorName: item.authorName,
+                          authorUrl: item.authorUrl,
+                          durationSeconds: item.durationSeconds,
+                        },
+                        true
+                      );
+                    }}
+                    className="group text-left rounded-xl bg-white/5 hover:bg-white/15 border border-white/10 hover:border-rose-500 overflow-hidden transition-colors cursor-pointer"
+                  >
+                    <div className="relative w-full aspect-video bg-black overflow-hidden">
+                      <CachedThumbnail
+                        videoId={item.videoId}
+                        alt={item.title}
+                        isOnline={isOnline}
+                        fit="cover"
+                        className="w-full h-full group-hover:scale-105 transition-transform"
+                      />
+                      <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/35">
+                        <Play className="w-6 h-6 text-white fill-current" />
+                      </span>
+                      {item.durationText && (
+                        <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 font-mono text-[10px] text-white">
+                          {item.durationText}
+                        </span>
+                      )}
+                    </div>
+                    <div className="p-2">
+                      <div className="text-[11px] font-semibold text-white line-clamp-2 leading-snug">
+                        {item.title}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-slate-400 truncate">
+                        {item.authorName}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -1343,6 +1717,320 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
                 placeholder="Write key takeaways, lyrics, code snippets, or timestamps here..."
                 className="w-full rounded-xl border border-slate-200 dark:border-[#242A38] bg-slate-50 dark:bg-[#0B0D11] px-3 py-2.5 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50"
               />
+            </div>
+          )}
+
+          {/* Silent Auto-Save Confirmation Banner when suggested link is captured */}
+          {autoSaveNotice && (
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-2 flex items-center gap-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span className="truncate">{autoSaveNotice}</span>
+            </div>
+          )}
+
+          {/* Native In-App Suggested Videos & All Suggested URLs Extractor */}
+          {!zenMode && isOnline && (relatedLoading || relatedVideos.length > 0) && (
+            <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-4 sm:p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <Compass className="w-4 h-4 text-rose-500 shrink-0" />
+                  <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
+                    Suggested Videos {relatedVideos.length > 0 ? `(${relatedVideos.length})` : ''}
+                  </h2>
+                </div>
+
+                {relatedVideos.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleCopyAllSuggestedUrls}
+                      className={`min-h-[34px] px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        copiedAllUrls
+                          ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                          : 'border-slate-200 dark:border-[#242A38] bg-slate-50 dark:bg-[#0E1117] text-slate-800 dark:text-slate-100 hover:border-rose-500/60'
+                      }`}
+                    >
+                      {copiedAllUrls ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Copied All {relatedVideos.length} URLs</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5 text-rose-500" />
+                          <span>Copy All URLs ({relatedVideos.length})</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowAllUrlsDrawer((v) => !v)}
+                      className={`min-h-[34px] px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                        showAllUrlsDrawer
+                          ? 'border-rose-600 bg-rose-600/10 text-rose-600 dark:text-rose-400'
+                          : 'border-slate-200 dark:border-[#242A38] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1C212C]'
+                      }`}
+                    >
+                      <Link2 className="w-3.5 h-3.5" />
+                      <span>{showAllUrlsDrawer ? 'Hide URLs' : 'All URLs List'}</span>
+                    </button>
+
+                    {onSaveAllSuggested && (
+                      <button
+                        type="button"
+                        onClick={handleSaveAllSuggestedClick}
+                        disabled={savingAllRelated}
+                        className="min-h-[34px] px-3 rounded-lg bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        {savingAllRelated ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Plus className="w-3.5 h-3.5" />
+                        )}
+                        <span>Save All</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={handlePasteAndPlayClick}
+                      title="Paste copied YouTube link and play inside TubeVault"
+                      className="min-h-[34px] px-3 rounded-lg border border-slate-200 dark:border-[#242A38] text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1C212C] inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <ClipboardPaste className="w-3.5 h-3.5 text-rose-500" />
+                      <span>Paste &amp; Play</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Optional 1-tap Paste Link input when user manually copied an external link */}
+              {pasteBoxOpen && (
+                <form
+                  onSubmit={handleSubmitPasteUrl}
+                  className="rounded-xl border border-slate-200 dark:border-[#242A38] bg-slate-50 dark:bg-[#0B0D11] p-3 flex flex-col sm:flex-row gap-2"
+                >
+                  <input
+                    type="text"
+                    value={pasteUrlValue}
+                    onChange={(e) => setPasteUrlValue(e.target.value)}
+                    placeholder="Yahan copied YouTube link paste karein..."
+                    autoFocus
+                    className="flex-1 min-h-[38px] rounded-lg border border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] px-3 text-xs text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50"
+                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="submit"
+                      className="min-h-[38px] px-4 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold cursor-pointer"
+                    >
+                      Save &amp; Play Here
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPasteBoxOpen(false);
+                        setPasteError(null);
+                      }}
+                      className="min-h-[38px] px-2.5 rounded-lg border border-slate-200 dark:border-[#242A38] text-xs text-slate-500 cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  {pasteError && (
+                    <span className="text-[11px] text-rose-500 self-center">{pasteError}</span>
+                  )}
+                </form>
+              )}
+
+              {/* Expanded All Suggested URLs Drawer (every watchUrl ready to copy, select, or play) */}
+              {showAllUrlsDrawer && relatedVideos.length > 0 && (
+                <div className="rounded-xl border border-slate-200 dark:border-[#242A38] bg-slate-50 dark:bg-[#0B0D11] p-3.5 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-900 dark:text-white">
+                      All {relatedVideos.length} Suggested YouTube URLs
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleCopyAllSuggestedUrls}
+                      className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Copy className="w-3 h-3" />
+                      <span>{copiedAllUrls ? 'Copied!' : 'Copy All'}</span>
+                    </button>
+                  </div>
+
+                  <textarea
+                    readOnly
+                    rows={4}
+                    onFocus={(e) => e.currentTarget.select()}
+                    value={relatedVideos.map((v) => v.watchUrl).join('\n')}
+                    aria-label="All suggested YouTube URLs"
+                    className="w-full rounded-lg border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-2.5 font-mono text-[11px] text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-rose-600/40"
+                  />
+
+                  <div className="max-h-56 overflow-y-auto divide-y divide-slate-200/70 dark:divide-[#1E2430]">
+                    {relatedVideos.map((item, idx) => (
+                      <div
+                        key={`url-${item.videoId}`}
+                        className="py-2 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-slate-800 dark:text-slate-200 truncate">
+                            {idx + 1}. {item.title}
+                          </div>
+                          <div className="font-mono text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                            {item.watchUrl}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleCopySingleSuggestedUrl(item.videoId, item.watchUrl)}
+                            className="px-2.5 py-1 rounded-md border border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] text-[11px] font-medium text-slate-700 dark:text-slate-200 hover:border-rose-500/60 cursor-pointer"
+                          >
+                            {copiedSingleId === item.videoId ? 'Copied' : 'Copy'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onCaptureSuggestedVideo?.(
+                                {
+                                  videoId: item.videoId,
+                                  title: item.title,
+                                  authorName: item.authorName,
+                                  authorUrl: item.authorUrl,
+                                  durationSeconds: item.durationSeconds,
+                                },
+                                true
+                              )
+                            }
+                            className="px-2.5 py-1 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-semibold cursor-pointer"
+                          >
+                            Play
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {relatedLoading && relatedVideos.length === 0 ? (
+                <div className="py-6 flex items-center justify-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                  <Loader2 className="w-4 h-4 animate-spin text-rose-500" />
+                  <span>Loading suggested videos &amp; URLs...</span>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                    {(showAllRelatedGrid ? relatedVideos : relatedVideos.slice(0, 12)).map((item) => {
+                      const alreadyInLib = existingVideoIds?.has(item.videoId);
+                      const isCopied = copiedSingleId === item.videoId;
+                      return (
+                        <div
+                          key={item.videoId}
+                          className="group rounded-xl border border-slate-200 dark:border-[#1E2430] hover:border-rose-500/70 bg-slate-50/60 dark:bg-[#0E1117] overflow-hidden transition-colors flex flex-col"
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onCaptureSuggestedVideo?.(
+                                {
+                                  videoId: item.videoId,
+                                  title: item.title,
+                                  authorName: item.authorName,
+                                  authorUrl: item.authorUrl,
+                                  durationSeconds: item.durationSeconds,
+                                },
+                                true
+                              )
+                            }
+                            className="text-left flex-1 flex flex-col cursor-pointer"
+                          >
+                            <div className="relative w-full aspect-video bg-black overflow-hidden">
+                              <CachedThumbnail
+                                videoId={item.videoId}
+                                alt={item.title}
+                                isOnline={isOnline}
+                                fit="cover"
+                                className="w-full h-full group-hover:scale-[1.03] transition-transform duration-200"
+                              />
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-transparent to-transparent" />
+                              <span className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                <span className="w-10 h-10 rounded-full bg-rose-600 text-white flex items-center justify-center shadow-lg">
+                                  <Play className="w-4 h-4 fill-current ml-0.5" />
+                                </span>
+                              </span>
+                              {item.durationText && (
+                                <span className="absolute bottom-1.5 right-1.5 rounded bg-black/85 px-1.5 py-0.5 font-mono text-[10px] font-medium text-white tabular-nums">
+                                  {item.durationText}
+                                </span>
+                              )}
+                              {alreadyInLib && (
+                                <span className="absolute top-1.5 left-1.5 rounded bg-emerald-600/90 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                                  Saved
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="p-2.5 flex-1 flex flex-col justify-between gap-1">
+                              <h3 className="text-xs font-semibold text-slate-900 dark:text-white line-clamp-2 leading-snug group-hover:text-rose-500 transition-colors">
+                                {item.title}
+                              </h3>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                {item.authorName}
+                                {item.viewText ? ` · ${item.viewText}` : ''}
+                              </div>
+                            </div>
+                          </button>
+
+                          <div className="px-2.5 py-1.5 border-t border-slate-200/70 dark:border-[#1E2430] flex items-center justify-between gap-2 text-[11px]">
+                            <span className="font-mono text-slate-400 dark:text-slate-500 truncate">
+                              youtu.be/{item.videoId}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleCopySingleSuggestedUrl(item.videoId, item.watchUrl)}
+                              className={`px-2 py-0.5 rounded font-medium inline-flex items-center gap-1 shrink-0 transition-colors cursor-pointer ${
+                                isCopied
+                                  ? 'text-emerald-600 dark:text-emerald-400'
+                                  : 'text-slate-600 dark:text-slate-300 hover:text-rose-500'
+                              }`}
+                            >
+                              {isCopied ? (
+                                <>
+                                  <Check className="w-3 h-3" />
+                                  <span>Copied</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>Copy URL</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {relatedVideos.length > 12 && (
+                    <div className="pt-1 flex justify-center">
+                      <button
+                        type="button"
+                        onClick={() => setShowAllRelatedGrid((v) => !v)}
+                        className="min-h-[36px] px-4 rounded-xl border border-slate-200 dark:border-[#242A38] text-xs font-semibold text-slate-700 dark:text-slate-200 hover:border-rose-500/60 cursor-pointer"
+                      >
+                        {showAllRelatedGrid
+                          ? 'Show Fewer'
+                          : `Show All ${relatedVideos.length} Suggested Videos`}
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
