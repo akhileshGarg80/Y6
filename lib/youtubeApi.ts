@@ -662,3 +662,154 @@ export async function getThumbnailBinary(videoId: string): Promise<{
 
   return null;
 }
+
+export interface ExtractedReel {
+  videoId: string;
+  title: string;
+  authorName: string;
+  viewText: string;
+  thumbnailUrl: string;
+  shortsUrl: string;
+}
+
+const REEL_TOPIC_POOLS: Record<string, string[]> = {
+  all: [
+    'trending viral #shorts',
+    'hindi song status #shorts',
+    'funny comedy #shorts',
+    'amazing tech gadgets #shorts',
+    'music beats dance #shorts',
+    'cricket moments #shorts',
+    'motivation life #shorts',
+    'nature 4k beauty #shorts',
+    'gaming clips #shorts',
+    'science facts #shorts',
+  ],
+  music: [
+    'hindi song status #shorts',
+    'arijit singh song #shorts',
+    'lofi remix beats #shorts',
+    'punjabi song status #shorts',
+    'english pop song #shorts',
+    'guitar cover #shorts',
+  ],
+  comedy: [
+    'funny comedy #shorts',
+    'standup comedy clip #shorts',
+    'memes funny #shorts',
+    'prank laugh #shorts',
+  ],
+  tech: [
+    'ai tech tips #shorts',
+    'cool gadgets #shorts',
+    'coding programming #shorts',
+    'smartphone tricks #shorts',
+  ],
+  motivation: [
+    'motivation speech #shorts',
+    'success mindset #shorts',
+    'fitness workout #shorts',
+    'discipline focus #shorts',
+  ],
+  gaming: [
+    'gaming clutch #shorts',
+    'minecraft gta #shorts',
+    'bgmi freefire #shorts',
+    'esports highlights #shorts',
+  ],
+};
+
+export async function getReelsFeed(
+  topic = 'all',
+  page = 0
+): Promise<{reels: ExtractedReel[]; topic: string; page: number; nextPage: number}> {
+  const cleanTopic = (topic || 'all').trim().toLowerCase();
+  const pool = REEL_TOPIC_POOLS[cleanTopic] || [
+    `${cleanTopic} #shorts`,
+    `${cleanTopic} #youtubeshorts`,
+    `${cleanTopic} viral #shorts`,
+    `${cleanTopic} best #shorts`,
+  ];
+
+  const query = pool[Math.abs(page) % pool.length];
+  const resp = await fetch(
+    `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIYAQ%3D%3D`,
+    {
+      headers: YT_HEADERS,
+      signal: AbortSignal.timeout(8000),
+    }
+  );
+
+  if (!resp.ok) {
+    throw new Error(`Reels fetch failed (${resp.status})`);
+  }
+
+  const html = await resp.text();
+  const data = extractYtInitialData(html);
+  const reels: ExtractedReel[] = [];
+  const seen = new Set<string>();
+
+  if (data) {
+    for (const raw of collectByKey(data, 'shortsLockupViewModel')) {
+      const s = raw as {
+        onTap?: {innertubeCommand?: {reelWatchEndpoint?: {videoId?: string}}};
+        overlayMetadata?: {
+          primaryText?: {content?: string};
+          secondaryText?: {content?: string};
+        };
+        thumbnailViewModel?: {
+          thumbnailViewModel?: {image?: {sources?: Array<{url?: string}>}};
+        };
+      };
+
+      const videoId = String(s?.onTap?.innertubeCommand?.reelWatchEndpoint?.videoId || '').trim();
+      if (!isValidVideoId(videoId) || seen.has(videoId)) continue;
+      seen.add(videoId);
+
+      const title =
+        s?.overlayMetadata?.primaryText?.content?.trim() || `YouTube Short (${videoId})`;
+      const viewText = s?.overlayMetadata?.secondaryText?.content?.trim() || '';
+      const rawThumb = s?.thumbnailViewModel?.thumbnailViewModel?.image?.sources?.[0]?.url;
+      const thumbnailUrl = rawThumb || `https://i.ytimg.com/vi/${videoId}/oar2.jpg`;
+
+      reels.push({
+        videoId,
+        title,
+        authorName: cleanTopic === 'all' ? 'YouTube Shorts' : `#${cleanTopic}`,
+        viewText,
+        thumbnailUrl,
+        shortsUrl: `https://www.youtube.com/shorts/${videoId}`,
+      });
+    }
+
+    // Supplement with short legacy videos (< 90s) if Shorts shelf had fewer items
+    if (reels.length < 10) {
+      for (const raw of collectByKey(data, 'videoRenderer')) {
+        const item = normalizeLegacyVideoRenderer(raw as Record<string, unknown>);
+        if (
+          item &&
+          !seen.has(item.videoId) &&
+          (item.durationSeconds === null || item.durationSeconds <= 95)
+        ) {
+          seen.add(item.videoId);
+          reels.push({
+            videoId: item.videoId,
+            title: item.title,
+            authorName: item.authorName || 'YouTube Shorts',
+            viewText: item.viewText,
+            thumbnailUrl: `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+            shortsUrl: `https://www.youtube.com/shorts/${item.videoId}`,
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    reels: reels.slice(0, 30),
+    topic: cleanTopic,
+    page,
+    nextPage: page + 1,
+  };
+}
+

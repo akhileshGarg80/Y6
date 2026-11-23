@@ -2,6 +2,7 @@ import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Disc3,
   Headphones,
+  Heart,
   Loader2,
   Lock,
   Moon,
@@ -563,6 +564,9 @@ interface MusicPlayerViewProps {
   collections: string[];
   isOnline: boolean;
   controller: MusicController;
+  externalSearchQuery?: string;
+  onToggleLike?: (video: VideoItem) => void;
+  onLoadStarters?: () => void;
 }
 
 export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
@@ -570,15 +574,21 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
   collections,
   isOnline,
   controller,
+  externalSearchQuery = '',
+  onToggleLike,
+  onLoadStarters,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCollection, setActiveCollection] = useState('All');
+  const [likedOnly, setLikedOnly] = useState(false);
   const [glowUrl, setGlowUrl] = useState<string | null>(null);
   const [pocketMode, setPocketMode] = useState(false);
   const [wakeLockActive, setWakeLockActive] = useState(false);
   const [lastBlackTapAt, setLastBlackTapAt] = useState(0);
   const [unlockHint, setUnlockHint] = useState(false);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
+
+  const effectiveSearch = (externalSearchQuery || searchQuery).trim().toLowerCase();
 
   const displayTrack = controller.activeTrack ?? videos[0] ?? null;
 
@@ -642,16 +652,16 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
   }, [displayTrack?.videoId]);
 
   const filtered = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
     return videos.filter((v) => {
+      if (likedOnly && !v.liked) return false;
       if (activeCollection !== 'All' && v.collection !== activeCollection) return false;
-      if (q) {
+      if (effectiveSearch) {
         const hay = `${v.title} ${v.authorName} ${v.collection}`.toLowerCase();
-        if (!hay.includes(q)) return false;
+        if (!hay.includes(effectiveSearch)) return false;
       }
       return true;
     });
-  }, [videos, searchQuery, activeCollection]);
+  }, [videos, effectiveSearch, activeCollection, likedOnly]);
 
   const progressPct =
     controller.duration > 0
@@ -720,8 +730,19 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
       )}
 
       {videos.length === 0 ? (
-        <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-12 text-center text-sm text-slate-500">
-          No videos in your library yet. Tap the bottom <strong>+</strong> button to add tracks or playlists.
+        <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-12 text-center space-y-4">
+          <p className="text-sm text-slate-500">
+            No videos in your library yet. Search above, tap <strong>+</strong>, or load starter tracks.
+          </p>
+          {onLoadStarters && (
+            <button
+              type="button"
+              onClick={onLoadStarters}
+              className="min-h-[40px] px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold cursor-pointer"
+            >
+              Load Starter Tracks
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -887,6 +908,22 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2">
+                      {onToggleLike && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleLike(displayTrack)}
+                          aria-label={displayTrack.liked ? 'Unlike track' : 'Like track'}
+                          className={`min-h-[38px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                            displayTrack.liked
+                              ? 'border-rose-500/50 bg-rose-600/15 text-rose-500'
+                              : 'border-slate-200 dark:border-[#242A38] text-slate-600 dark:text-slate-300 hover:text-rose-500'
+                          }`}
+                        >
+                          <Heart className={`w-3.5 h-3.5 ${displayTrack.liked ? 'fill-current' : ''}`} />
+                          <span>{displayTrack.liked ? 'Liked' : 'Like'}</span>
+                        </button>
+                      )}
+
                       <select
                         aria-label="Audio speed"
                         value={controller.playbackRate}
@@ -920,92 +957,153 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
           )}
 
           {/* Filter & Search Tracklist */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="relative flex-1 max-w-md">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="search"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search any song or video track..."
-                className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] pl-10 pr-4 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50"
-              />
-            </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {!externalSearchQuery && (
+              <div className="relative flex-1 min-w-[200px] max-w-md">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search any song or video track..."
+                  className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] pl-10 pr-4 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50"
+                />
+              </div>
+            )}
 
-            <select
-              aria-label="Filter music by collection"
-              value={activeCollection}
-              onChange={(e) => setActiveCollection(e.target.value)}
-              className="min-h-[40px] rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] px-3 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
-            >
-              {['All', ...collections].map((col) => (
-                <option key={col} value={col}>
-                  {col}
-                </option>
-              ))}
-            </select>
+            <div className="flex items-center gap-2 ml-auto">
+              <button
+                type="button"
+                onClick={() => setLikedOnly((v) => !v)}
+                className={`min-h-[40px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                  likedOnly
+                    ? 'border-rose-500/50 bg-rose-600/15 text-rose-500'
+                    : 'border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                <Heart className={`w-3.5 h-3.5 ${likedOnly ? 'fill-current' : ''}`} />
+                <span>Liked Only</span>
+              </button>
+
+              <select
+                aria-label="Filter music by collection"
+                value={activeCollection}
+                onChange={(e) => setActiveCollection(e.target.value)}
+                className="min-h-[40px] rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] px-3 text-xs font-medium text-slate-700 dark:text-slate-200 cursor-pointer"
+              >
+                {['All', ...collections].map((col) => (
+                  <option key={col} value={col}>
+                    {col}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {/* All-Videos Audio Tracklist: click anywhere on any item -> instant sound! */}
-          <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] divide-y divide-slate-100 dark:divide-[#1E2430] overflow-hidden">
-            {filtered.map((item, idx) => {
-              const isCurrent = controller.activeTrack?.id === item.id;
-              const isCurrentPlaying = isCurrent && controller.isPlaying;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => controller.playTrack(item)}
-                  className={`w-full px-4 py-3 flex items-center gap-3.5 text-left transition-colors cursor-pointer ${
-                    isCurrent
-                      ? 'bg-rose-600/[0.08] dark:bg-rose-500/[0.10]'
-                      : 'hover:bg-slate-50 dark:hover:bg-[#171B24]'
-                  }`}
-                >
-                  <div className="w-6 text-center font-mono text-xs tabular-nums shrink-0 text-slate-400">
-                    {isCurrent && controller.isBuffering ? (
-                      <Loader2 className="w-4 h-4 text-rose-500 animate-spin mx-auto" />
-                    ) : isCurrentPlaying ? (
-                      <Pause className="w-4 h-4 text-rose-500 mx-auto fill-current" />
-                    ) : (
-                      <span>{idx + 1}</span>
+          {filtered.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-10 text-center space-y-3">
+              <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                No matching tracks in this filter.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setActiveCollection('All');
+                  setLikedOnly(false);
+                }}
+                className="min-h-[36px] px-4 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold cursor-pointer"
+              >
+                Show All Tracks ({videos.length})
+              </button>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] divide-y divide-slate-100 dark:divide-[#1E2430] overflow-hidden">
+              {filtered.map((item, idx) => {
+                const isCurrent = controller.activeTrack?.id === item.id;
+                const isCurrentPlaying = isCurrent && controller.isPlaying;
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => controller.playTrack(item)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        controller.playTrack(item);
+                      }
+                    }}
+                    className={`w-full px-4 py-3 flex items-center gap-3.5 text-left transition-colors cursor-pointer ${
+                      isCurrent
+                        ? 'bg-rose-600/[0.08] dark:bg-rose-500/[0.10]'
+                        : 'hover:bg-slate-50 dark:hover:bg-[#171B24]'
+                    }`}
+                  >
+                    <div className="w-6 text-center font-mono text-xs tabular-nums shrink-0 text-slate-400">
+                      {isCurrent && controller.isBuffering ? (
+                        <Loader2 className="w-4 h-4 text-rose-500 animate-spin mx-auto" />
+                      ) : isCurrentPlaying ? (
+                        <Pause className="w-4 h-4 text-rose-500 mx-auto fill-current" />
+                      ) : (
+                        <span>{idx + 1}</span>
+                      )}
+                    </div>
+
+                    <div className="relative w-16 aspect-video rounded-lg overflow-hidden bg-black shrink-0">
+                      <CachedThumbnail
+                        videoId={item.videoId}
+                        alt={item.title}
+                        isOnline={isOnline}
+                        fit="contain"
+                        className="w-full h-full"
+                      />
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`text-sm font-semibold truncate ${
+                          isCurrent
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-slate-900 dark:text-white'
+                        }`}
+                      >
+                        {item.title}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 truncate">
+                        <span className="truncate">{item.authorName}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{item.collection}</span>
+                      </div>
+                    </div>
+
+                    {onToggleLike && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleLike(item);
+                        }}
+                        aria-label={item.liked ? `Unlike ${item.title}` : `Like ${item.title}`}
+                        className={`min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg transition-colors cursor-pointer shrink-0 ${
+                          item.liked
+                            ? 'text-rose-500 bg-rose-500/10'
+                            : 'text-slate-400 hover:text-rose-500'
+                        }`}
+                      >
+                        <Heart className={`w-4 h-4 ${item.liked ? 'fill-current' : ''}`} />
+                      </button>
                     )}
-                  </div>
 
-                  <div className="relative w-16 aspect-video rounded-lg overflow-hidden bg-black shrink-0">
-                    <CachedThumbnail
-                      videoId={item.videoId}
-                      alt={item.title}
-                      isOnline={isOnline}
-                      fit="contain"
-                      className="w-full h-full"
-                    />
-                  </div>
-
-                  <div className="min-w-0 flex-1">
-                    <div
-                      className={`text-sm font-semibold truncate ${
-                        isCurrent
-                          ? 'text-rose-600 dark:text-rose-400'
-                          : 'text-slate-900 dark:text-white'
-                      }`}
-                    >
-                      {item.title}
-                    </div>
-                    <div className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 truncate">
-                      <span className="truncate">{item.authorName}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{item.collection}</span>
+                    <div className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                      {item.durationSeconds ? formatDuration(item.durationSeconds) : '—'}
                     </div>
                   </div>
-
-                  <div className="font-mono text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
-                    {item.durationSeconds ? formatDuration(item.durationSeconds) : '—'}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </>
       )}
 

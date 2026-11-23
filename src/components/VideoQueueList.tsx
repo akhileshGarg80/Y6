@@ -3,6 +3,7 @@ import {
   ArrowDown,
   ArrowUp,
   Bookmark,
+  Heart,
   ListPlus,
   Play,
   Search,
@@ -20,12 +21,14 @@ interface VideoQueueListProps {
   collections: string[];
   activeInlineKey: string | null;
   keyPrefix: string;
+  externalSearchQuery?: string;
   onPlayInline: (key: string) => void;
   onStopInline: () => void;
   onCaptureSuggestedVideo?: (suggested: SuggestedVideoInput) => void;
   onSelectVideo: (id: string) => void;
   onMoveVideo: (id: string, direction: 'up' | 'down') => void;
   onPlayNext?: (id: string) => void;
+  onToggleLike?: (video: VideoItem) => void;
   onDeleteVideo: (video: VideoItem) => void;
   layout?: 'sidebar' | 'grid';
 }
@@ -37,37 +40,41 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
   collections,
   activeInlineKey,
   keyPrefix,
+  externalSearchQuery = '',
   onPlayInline,
   onStopInline,
   onCaptureSuggestedVideo,
   onSelectVideo,
   onMoveVideo,
   onPlayNext,
+  onToggleLike,
   onDeleteVideo,
   layout = 'sidebar',
 }) => {
   const pageBatch = layout === 'grid' ? 24 : 30;
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCollection, setActiveCollection] = useState('All');
-  const [typeFilter, setTypeFilter] = useState<'all' | 'continue' | 'bookmarked' | 'chapters'>(
-    'all'
-  );
+  const [typeFilter, setTypeFilter] = useState<
+    'all' | 'liked' | 'continue' | 'bookmarked' | 'chapters'
+  >('all');
   const [sortBy, setSortBy] = useState<'queue' | 'recent' | 'duration' | 'title'>('queue');
   const [cardSize, setCardSize] = useState<'large' | 'cinema'>('large');
   const [visibleCount, setVisibleCount] = useState(pageBatch);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
+  const effectiveSearch = (externalSearchQuery || searchQuery).trim().toLowerCase();
+
   const filtered = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
     const list = videos.filter((v) => {
       if (activeCollection !== 'All' && v.collection !== activeCollection) return false;
+      if (typeFilter === 'liked' && !v.liked) return false;
       if (typeFilter === 'continue' && !(v.lastPositionSeconds > 5)) return false;
       if (typeFilter === 'bookmarked' && v.bookmarks.length === 0) return false;
       if (typeFilter === 'chapters' && !(v.chapters && v.chapters.length > 0)) return false;
 
-      if (q) {
+      if (effectiveSearch) {
         const hay = `${v.title} ${v.authorName} ${v.collection} ${v.notes}`.toLowerCase();
-        if (!hay.includes(q)) return false;
+        if (!hay.includes(effectiveSearch)) return false;
       }
       return true;
     });
@@ -82,11 +89,11 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
       return [...list].sort((a, b) => a.title.localeCompare(b.title));
     }
     return list;
-  }, [videos, searchQuery, activeCollection, typeFilter, sortBy]);
+  }, [videos, effectiveSearch, activeCollection, typeFilter, sortBy]);
 
   useEffect(() => {
     setVisibleCount(pageBatch);
-  }, [searchQuery, activeCollection, typeFilter, sortBy, pageBatch]);
+  }, [effectiveSearch, activeCollection, typeFilter, sortBy, pageBatch]);
 
   const visibleItems = useMemo(
     () => filtered.slice(0, visibleCount),
@@ -120,21 +127,28 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
   return (
     <div className="space-y-4">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div className="relative flex-1 max-w-md">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-          <input
-            type="search"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search videos, channels, collections, or notes..."
-            className="w-full min-h-[42px] rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] pl-10 pr-4 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50"
-          />
-        </div>
+        {layout === 'sidebar' && !externalSearchQuery ? (
+          <div className="relative flex-1 max-w-md">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Filter queue..."
+              className="w-full min-h-[40px] rounded-xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] pl-10 pr-4 text-xs text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50"
+            />
+          </div>
+        ) : (
+          <div className="hidden md:block text-xs text-slate-500 dark:text-slate-400 font-mono">
+            {effectiveSearch ? `Filtering by "${externalSearchQuery || searchQuery}"` : `${filtered.length} items`}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-100 dark:bg-[#13161D] border border-slate-200 dark:border-[#1E2430] overflow-x-auto max-w-full">
             {[
               {id: 'all', label: 'All'},
+              {id: 'liked', label: 'Liked'},
               {id: 'continue', label: 'In Progress'},
               {id: 'bookmarked', label: 'Bookmarked'},
               {id: 'chapters', label: 'Chapters'},
@@ -329,6 +343,21 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                     </div>
 
                     <div className="flex items-center gap-1 shrink-0">
+                      {onToggleLike && (
+                        <button
+                          type="button"
+                          onClick={() => onToggleLike(item)}
+                          title={item.liked ? 'Liked (protected from clear unliked)' : 'Like & protect video'}
+                          aria-label={item.liked ? `Unlike ${item.title}` : `Like ${item.title}`}
+                          className={`min-h-[34px] min-w-[34px] flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
+                            item.liked
+                              ? 'text-rose-500 bg-rose-500/10'
+                              : 'text-slate-400 hover:text-rose-500'
+                          }`}
+                        >
+                          <Heart className={`w-3.5 h-3.5 ${item.liked ? 'fill-current' : ''}`} />
+                        </button>
+                      )}
                       {onPlayNext && !isActive && (
                         <button
                           type="button"
@@ -474,6 +503,21 @@ export const VideoQueueList: React.FC<VideoQueueListProps> = ({
                     >
                       <ArrowDown className="w-3.5 h-3.5" />
                     </button>
+                    {onToggleLike && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleLike(item)}
+                        title={item.liked ? 'Liked (protected)' : 'Like video'}
+                        aria-label={item.liked ? `Unlike ${item.title}` : `Like ${item.title}`}
+                        className={`p-1.5 rounded cursor-pointer ${
+                          item.liked
+                            ? 'text-rose-500'
+                            : 'text-slate-400 hover:text-rose-500'
+                        }`}
+                      >
+                        <Heart className={`w-3.5 h-3.5 ${item.liked ? 'fill-current' : ''}`} />
+                      </button>
+                    )}
                     {onPlayNext && !isActive && (
                       <button
                         type="button"

@@ -28,6 +28,7 @@ export interface VideoItem {
   chapters?: VideoChapter[];
   notes: string;
   thumbCached: boolean;
+  liked?: boolean;
 }
 
 export interface StorageStats {
@@ -37,7 +38,7 @@ export interface StorageStats {
   cachedThumbsCount: number;
 }
 
-export type AppView = 'home' | 'music' | 'player' | 'discover' | 'storage';
+export type AppView = 'home' | 'reels' | 'music' | 'player' | 'discover' | 'storage';
 
 export interface ActivePlayback {
   source: 'stage' | 'inline' | 'music';
@@ -62,5 +63,14 @@ export interface RelatedVideoItem {
   durationSeconds: number | null;
   viewText: string;
   watchUrl: string;
+}
+
+export interface ReelItem {
+  videoId: string;
+  title: string;
+  authorName: string;
+  viewText: string;
+  thumbnailUrl: string;
+  shortsUrl: string;
 }
 

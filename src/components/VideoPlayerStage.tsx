@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Eye,
   FileText,
+  Heart,
   Link2,
   ListTree,
   Loader2,
@@ -1565,6 +1566,19 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
               >
                 <BookmarkPlus className="w-3.5 h-3.5 text-rose-500" />
                 <span>Timestamps ({video.bookmarks.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onUpdateVideo({...video, liked: !video.liked})}
+                className={`min-h-[38px] px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  video.liked
+                    ? 'border-rose-600 bg-rose-600/10 text-rose-600 dark:text-rose-400'
+                    : 'border-slate-200 dark:border-[#242A38] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-[#1C212C]'
+                }`}
+              >
+                <Heart className={`w-3.5 h-3.5 text-rose-500 ${video.liked ? 'fill-current' : ''}`} />
+                <span>{video.liked ? 'Liked' : 'Like'}</span>
               </button>
 
               <button

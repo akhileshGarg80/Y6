@@ -252,6 +252,37 @@ export async function deleteVideoRecord(id: string, videoId: string): Promise<vo
   }
 }
 
+export async function deleteVideosBulk(
+  records: Array<{id: string; videoId: string}>
+): Promise<void> {
+  if (records.length === 0) return;
+
+  const idSet = new Set(records.map((r) => r.id));
+  const remaining = getCachedVideosSync().filter((v) => !idSet.has(v.id));
+  writeVideosToLocalStorage(remaining);
+
+  const remainingYtIds = new Set(remaining.map((v) => v.videoId));
+
+  try {
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([STORE_VIDEOS, STORE_THUMBS], 'readwrite');
+      const vStore = tx.objectStore(STORE_VIDEOS);
+      const tStore = tx.objectStore(STORE_THUMBS);
+      for (const rec of records) {
+        vStore.delete(rec.id);
+        if (!remainingYtIds.has(rec.videoId)) {
+          tStore.delete(rec.videoId);
+        }
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // localStorage mirror succeeded
+  }
+}
+
 export async function saveThumbnailBlob(videoId: string, blob: Blob): Promise<void> {
   try {
     const record: ThumbnailRecord = {videoId, blob, updatedAt: Date.now()};

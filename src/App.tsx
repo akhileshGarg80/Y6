@@ -1,17 +1,16 @@
 import React, {Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
+  Clapperboard,
   Compass,
   Database,
   Film,
   Headphones,
   Home,
-  Loader2,
-  Moon,
   Play,
   Plus,
   Search,
-  Sun,
   WifiOff,
+  X,
 } from 'lucide-react';
 import {CachedThumbnail} from './components/CachedThumbnail';
 import {
@@ -19,12 +18,14 @@ import {
   MusicPlayerView,
   useMusicAudioEngine,
 } from './components/MusicPlayerView';
-import {PWAInstallButton} from './components/PWAInstallButton';
+import {ReelsFeedView} from './components/ReelsFeedView';
+import {TopSearchResultsView} from './components/TopSearchResultsView';
 import {VideoPlayerStage} from './components/VideoPlayerStage';
 import {VideoQueueList} from './components/VideoQueueList';
 import {useOnlineStatus} from './hooks/useOnlineStatus';
 import {
   deleteVideoRecord,
+  deleteVideosBulk,
   getAllVideos,
   getCachedSettingSync,
   getCachedVideosSync,
@@ -103,6 +104,23 @@ export default function App() {
 
   const [showQuickAddHub, setShowQuickAddHub] = useState(false);
   const [discoverInitialQuery, setDiscoverInitialQuery] = useState<string | undefined>(undefined);
+  const [topSearchQuery, setTopSearchQuery] = useState('');
+  const [topSearchActiveQuery, setTopSearchActiveQuery] = useState('');
+  const [topSearchOpen, setTopSearchOpen] = useState(false);
+  const [topSearchNonce, setTopSearchNonce] = useState(0);
+  const [topSearchFocused, setTopSearchFocused] = useState(false);
+  const [liveSuggestVideos, setLiveSuggestVideos] = useState<
+    Array<{
+      videoId: string;
+      title: string;
+      authorName: string;
+      authorUrl: string;
+      durationText: string;
+      durationSeconds: number | null;
+    }>
+  >([]);
+  const [liveSuggestLoading, setLiveSuggestLoading] = useState(false);
+  const [restoringStarters, setRestoringStarters] = useState(false);
   const [theaterMode, setTheaterMode] = useState(true);
   const [zenMode, setZenMode] = useState(false);
   const [autoNextEnabled, setAutoNextEnabled] = useState(true);
@@ -166,6 +184,99 @@ export default function App() {
     });
   }, []);
 
+  const buildStarterVideos = useCallback(async (): Promise<VideoItem[]> => {
+    const seeded: VideoItem[] = [];
+    for (let i = 0; i < STARTER_VIDEO_IDS.length; i++) {
+      const entry = STARTER_VIDEO_IDS[i];
+      let title = `YouTube Video (${entry.videoId})`;
+      let authorName = 'YouTube';
+      let authorUrl = '';
+      let description = '';
+      let durationSeconds: number | null = null;
+      let chapters: VideoChapter[] | undefined = undefined;
+      let thumbCached = false;
+
+      if (navigator.onLine) {
+        try {
+          const metaResp = await fetch(
+            `/api/youtube/metadata?videoId=${encodeURIComponent(entry.videoId)}`
+          );
+          if (metaResp.ok) {
+            const meta = (await metaResp.json()) as {
+              title?: string;
+              authorName?: string;
+              authorUrl?: string;
+              description?: string;
+              durationSeconds?: number | null;
+              chapters?: VideoChapter[];
+            };
+            if (meta.title) title = meta.title;
+            if (meta.authorName) authorName = meta.authorName;
+            if (meta.authorUrl) authorUrl = meta.authorUrl;
+            if (meta.description) description = meta.description;
+            if (meta.durationSeconds) durationSeconds = meta.durationSeconds;
+            if (Array.isArray(meta.chapters)) chapters = meta.chapters;
+          }
+        } catch {
+          // Keep fallback
+        }
+
+        try {
+          const tResp = await fetch(
+            `/api/youtube/thumbnail?videoId=${encodeURIComponent(entry.videoId)}`
+          );
+          if (tResp.ok) {
+            const blob = await tResp.blob();
+            await saveThumbnailBlob(entry.videoId, blob);
+            thumbCached = true;
+          }
+        } catch {
+          // Ignore
+        }
+      }
+
+      seeded.push({
+        id: `${entry.videoId}-${Date.now()}-${i}`,
+        videoId: entry.videoId,
+        originalUrl: `https://www.youtube.com/watch?v=${entry.videoId}`,
+        title,
+        authorName,
+        authorUrl,
+        description,
+        durationSeconds,
+        collection: entry.collection,
+        addedAt: Date.now() + (STARTER_VIDEO_IDS.length - i),
+        lastWatchedAt: null,
+        lastPositionSeconds: 0,
+        playbackRate: 1,
+        bookmarks: [],
+        chapters,
+        notes: '',
+        thumbCached,
+      });
+    }
+    return seeded;
+  }, []);
+
+  const handleLoadStarterVideos = useCallback(async () => {
+    if (restoringStarters) return;
+    setRestoringStarters(true);
+    try {
+      const seeded = await buildStarterVideos();
+      await saveVideosBulk(seeded);
+      setVideos((prev) => {
+        const seen = new Set(prev.map((v) => v.videoId));
+        return [...prev, ...seeded.filter((s) => !seen.has(s.videoId))];
+      });
+      if (seeded[0]) {
+        setActiveVideoId((prev) => prev || seeded[0].id);
+      }
+      refreshStats();
+    } finally {
+      setRestoringStarters(false);
+    }
+  }, [restoringStarters, buildStarterVideos, refreshStats]);
+
   useEffect(() => {
     document.documentElement.classList.toggle('dark', initialTheme === 'dark');
     requestPersistentStorage();
@@ -188,76 +299,7 @@ export default function App() {
 
       if (workingVideos.length === 0 && !alreadyInitialized) {
         await setSetting('initialized', true);
-        const seeded: VideoItem[] = [];
-        for (let i = 0; i < STARTER_VIDEO_IDS.length; i++) {
-          const entry = STARTER_VIDEO_IDS[i];
-          let title = `YouTube Video (${entry.videoId})`;
-          let authorName = 'YouTube';
-          let authorUrl = '';
-          let description = '';
-          let durationSeconds: number | null = null;
-          let chapters: VideoChapter[] | undefined = undefined;
-          let thumbCached = false;
-
-          if (navigator.onLine) {
-            try {
-              const metaResp = await fetch(
-                `/api/youtube/metadata?videoId=${encodeURIComponent(entry.videoId)}`
-              );
-              if (metaResp.ok) {
-                const meta = (await metaResp.json()) as {
-                  title?: string;
-                  authorName?: string;
-                  authorUrl?: string;
-                  description?: string;
-                  durationSeconds?: number | null;
-                  chapters?: VideoChapter[];
-                };
-                if (meta.title) title = meta.title;
-                if (meta.authorName) authorName = meta.authorName;
-                if (meta.authorUrl) authorUrl = meta.authorUrl;
-                if (meta.description) description = meta.description;
-                if (meta.durationSeconds) durationSeconds = meta.durationSeconds;
-                if (Array.isArray(meta.chapters)) chapters = meta.chapters;
-              }
-            } catch {
-              // Keep fallback
-            }
-
-            try {
-              const tResp = await fetch(
-                `/api/youtube/thumbnail?videoId=${encodeURIComponent(entry.videoId)}`
-              );
-              if (tResp.ok) {
-                const blob = await tResp.blob();
-                await saveThumbnailBlob(entry.videoId, blob);
-                thumbCached = true;
-              }
-            } catch {
-              // Ignore
-            }
-          }
-
-          seeded.push({
-            id: `${entry.videoId}-${Date.now()}-${i}`,
-            videoId: entry.videoId,
-            originalUrl: `https://www.youtube.com/watch?v=${entry.videoId}`,
-            title,
-            authorName,
-            authorUrl,
-            description,
-            durationSeconds,
-            collection: entry.collection,
-            addedAt: Date.now() + (STARTER_VIDEO_IDS.length - i),
-            lastWatchedAt: null,
-            lastPositionSeconds: 0,
-            playbackRate: 1,
-            bookmarks: [],
-            chapters,
-            notes: '',
-            thumbCached,
-          });
-        }
+        const seeded = await buildStarterVideos();
         await saveVideosBulk(seeded);
         workingVideos = seeded;
       }
@@ -274,7 +316,7 @@ export default function App() {
       setLoading(false);
     }
     init();
-  }, [refreshStats, initialTheme, initialActiveId, initialAutoHarvest]);
+  }, [refreshStats, initialTheme, initialActiveId, initialAutoHarvest, buildStarterVideos]);
 
   // Observe scroll past player stage -> float smoothly to Mini-Player
   useEffect(() => {
@@ -537,6 +579,12 @@ export default function App() {
     setActivePlayback((prev) => (prev?.source === 'inline' ? null : prev));
   }, []);
 
+  const handleReelPlaybackStarted = useCallback(() => {
+    setActivePlayback(null);
+    setPauseStageSignal((s) => s + 1);
+    setPauseMusicSignal((s) => s + 1);
+  }, []);
+
   // Claim playback for main Stage/Mini-player -> immediately stops any inline card AND pauses music audio
   const handleStagePlaybackStarted = useCallback(() => {
     setActivePlayback((prev) => ({
@@ -554,6 +602,7 @@ export default function App() {
   }, []);
 
   const handleSelectVideo = useCallback((id: string) => {
+    setTopSearchOpen(false);
     setActivePlayback((prev) => ({
       source: 'stage',
       key: 'stage',
@@ -845,6 +894,86 @@ export default function App() {
     await saveVideo(updated);
   }, []);
 
+  const handleToggleLike = useCallback(async (target: VideoItem) => {
+    const nextItem: VideoItem = {...target, liked: !target.liked};
+    setVideos((prev) => prev.map((v) => (v.id === target.id ? nextItem : v)));
+    await saveVideo(nextItem);
+  }, []);
+
+  const handleSaveAndLikeVideo = useCallback(
+    async (suggested: SuggestedVideoInput) => {
+      const ytId = suggested.videoId?.trim();
+      if (!ytId) return;
+      const existing = videosRef.current.find((v) => v.videoId === ytId);
+      if (existing) {
+        const nextItem: VideoItem = {...existing, liked: !existing.liked};
+        setVideos((prev) => prev.map((v) => (v.id === existing.id ? nextItem : v)));
+        await saveVideo(nextItem);
+        return;
+      }
+      const now = Date.now();
+      const item: VideoItem = {
+        id: `${ytId}-${now}`,
+        videoId: ytId,
+        originalUrl: `https://www.youtube.com/watch?v=${ytId}`,
+        title: suggested.title?.trim() || `YouTube Video (${ytId})`,
+        authorName: suggested.authorName?.trim() || 'YouTube Creator',
+        authorUrl: suggested.authorUrl || '',
+        description: '',
+        durationSeconds: suggested.durationSeconds ?? null,
+        collection: 'Watch Later',
+        addedAt: now,
+        lastWatchedAt: null,
+        lastPositionSeconds: 0,
+        playbackRate: 1,
+        bookmarks: [],
+        notes: '',
+        liked: true,
+        thumbCached: false,
+      };
+      setVideos((prev) => [item, ...prev]);
+      await saveVideo(item);
+      refreshStats();
+    },
+    [refreshStats]
+  );
+
+  const handlePlaySearchInMusic = useCallback(
+    async (suggested: SuggestedVideoInput) => {
+      const ytId = suggested.videoId?.trim();
+      if (!ytId) return;
+      const existing = videosRef.current.find((v) => v.videoId === ytId);
+      if (existing) {
+        musicController.playTrack(existing);
+        return;
+      }
+      const now = Date.now();
+      const item: VideoItem = {
+        id: `${ytId}-${now}`,
+        videoId: ytId,
+        originalUrl: `https://www.youtube.com/watch?v=${ytId}`,
+        title: suggested.title?.trim() || `YouTube Video (${ytId})`,
+        authorName: suggested.authorName?.trim() || 'YouTube Creator',
+        authorUrl: suggested.authorUrl || '',
+        description: '',
+        durationSeconds: suggested.durationSeconds ?? null,
+        collection: 'Music',
+        addedAt: now,
+        lastWatchedAt: now,
+        lastPositionSeconds: 0,
+        playbackRate: 1,
+        bookmarks: [],
+        notes: '',
+        thumbCached: false,
+      };
+      setVideos((prev) => (prev.some((v) => v.videoId === ytId) ? prev : [item, ...prev]));
+      await saveVideo(item);
+      musicController.playTrack(item);
+      refreshStats();
+    },
+    [musicController, refreshStats]
+  );
+
   const handleDeleteVideo = useCallback(
     async (target: VideoItem) => {
       dismissedVideoIdsRef.current.add(target.videoId);
@@ -859,6 +988,35 @@ export default function App() {
         return next;
       });
       refreshStats();
+    },
+    [activeVideoId, refreshStats]
+  );
+
+  const handleBulkDeleteVideos = useCallback(
+    async (includeLiked: boolean): Promise<number> => {
+      const targets = includeLiked
+        ? videosRef.current
+        : videosRef.current.filter((v) => !v.liked);
+      if (targets.length === 0) return 0;
+
+      for (const t of targets) {
+        dismissedVideoIdsRef.current.add(t.videoId);
+      }
+
+      const targetIds = new Set(targets.map((t) => t.id));
+      await deleteVideosBulk(targets.map((t) => ({id: t.id, videoId: t.videoId})));
+
+      setVideos((prev) => {
+        const next = prev.filter((v) => !targetIds.has(v.id));
+        if (activeVideoId && targetIds.has(activeVideoId)) {
+          const nextActive = next[0]?.id ?? null;
+          setActiveVideoId(nextActive);
+          setSetting('activeVideoId', nextActive);
+        }
+        return next;
+      });
+      refreshStats();
+      return targets.length;
     },
     [activeVideoId, refreshStats]
   );
@@ -920,6 +1078,7 @@ export default function App() {
 
   const navItems: Array<{id: AppView; label: string}> = [
     {id: 'home', label: 'Home'},
+    {id: 'reels', label: 'Reels'},
     {id: 'music', label: 'Music'},
     {id: 'player', label: 'Player'},
     {id: 'discover', label: 'Discover'},
@@ -928,13 +1087,92 @@ export default function App() {
 
   const isFloatingMini =
     Boolean(activeVideo) &&
+    activeView !== 'reels' &&
     ((activeView !== 'player' && activeView !== 'music' && miniPlayerVisible) ||
       (activeView === 'player' && scrolledPastStage && miniPlayerVisible));
 
   const showTopPlayerStage = activeView === 'player' && !isFloatingMini;
 
   const showMusicMiniBar =
-    activeView !== 'music' && Boolean(musicController.activeTrack) && !isFloatingMini;
+    activeView !== 'music' &&
+    activeView !== 'reels' &&
+    Boolean(musicController.activeTrack) &&
+    !isFloatingMini;
+
+  const quickSearchMatches = useMemo(() => {
+    const q = topSearchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return videos
+      .filter((v) =>
+        `${v.title} ${v.authorName} ${v.collection}`.toLowerCase().includes(q)
+      )
+      .slice(0, 4);
+  }, [videos, topSearchQuery]);
+
+  // Live debounced YouTube suggestions in Top Nav dropdown (YouTube feel)
+  useEffect(() => {
+    const q = topSearchQuery.trim();
+    if (!topSearchFocused || topSearchOpen || q.length < 2 || !isOnline) {
+      if (q.length < 2) {
+        setLiveSuggestVideos([]);
+        setLiveSuggestLoading(false);
+      }
+      return;
+    }
+
+    const controller = new AbortController();
+    setLiveSuggestLoading(true);
+    const timer = setTimeout(() => {
+      fetch(`/api/youtube/search?q=${encodeURIComponent(q)}&filter=videos`, {
+        signal: controller.signal,
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then(
+          (
+            data: {
+              videos?: Array<{
+                videoId: string;
+                title: string;
+                authorName: string;
+                authorUrl: string;
+                durationText: string;
+                durationSeconds: number | null;
+              }>;
+            } | null
+          ) => {
+            if (!controller.signal.aborted) {
+              setLiveSuggestVideos(Array.isArray(data?.videos) ? data.videos.slice(0, 5) : []);
+            }
+          }
+        )
+        .catch(() => {
+          if (!controller.signal.aborted) setLiveSuggestVideos([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLiveSuggestLoading(false);
+        });
+    }, 320);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [topSearchQuery, topSearchFocused, topSearchOpen, isOnline]);
+
+  const openDirectTopSearch = (rawQuery: string) => {
+    const q = rawQuery.trim();
+    if (!q) return;
+    setTopSearchFocused(false);
+    setTopSearchActiveQuery(q);
+    setTopSearchOpen(true);
+    setTopSearchNonce((n) => n + 1);
+    window.scrollTo({top: 0, behavior: 'smooth'});
+  };
+
+  const handleTopSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    openDirectTopSearch(topSearchQuery);
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
@@ -945,12 +1183,13 @@ export default function App() {
         className="fixed bottom-0 left-0 -z-10 w-[200px] h-[112px] opacity-[0.01] pointer-events-none overflow-hidden"
       />
 
-      {/* Clean Three-Zone Top Bar */}
-      <header className="sticky top-0 z-30 h-[52px] md:h-16 border-b border-slate-200 dark:border-[#1E2430] bg-white/90 dark:bg-[#0B0D11]/90 backdrop-blur-md">
-        <div className="max-w-[1440px] mx-auto h-full px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-6">
+      {/* Clean Top Bar: Brand + Nav Tabs + Direct YouTube-style Search Bar */}
+      <header className="sticky top-0 z-30 h-[56px] md:h-16 border-b border-slate-200 dark:border-[#1E2430] bg-white/95 dark:bg-[#0B0D11]/95 backdrop-blur-md">
+        <div className="max-w-[1440px] mx-auto h-full px-3 sm:px-6 flex items-center justify-between gap-2.5 sm:gap-5">
           <button
             type="button"
             onClick={() => {
+              setTopSearchOpen(false);
               setActiveView('home');
               window.scrollTo({top: 0, behavior: 'smooth'});
             }}
@@ -959,14 +1198,15 @@ export default function App() {
             TubeVault
           </button>
 
-          <nav className="hidden md:flex items-center gap-7 text-sm font-medium">
+          <nav className="hidden md:flex items-center gap-6 text-sm font-medium shrink-0">
             {navItems.map((item) => {
-              const active = activeView === item.id;
+              const active = !topSearchOpen && activeView === item.id;
               return (
                 <button
                   key={item.id}
                   type="button"
                   onClick={() => {
+                    setTopSearchOpen(false);
                     setActiveView(item.id);
                     if (item.id === 'player') {
                       setMiniPlayerVisible(false);
@@ -984,64 +1224,205 @@ export default function App() {
             })}
           </nav>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowSuggestionsModal(true)}
-              title="View all auto-fetched suggested video URLs"
-              className={`min-h-[36px] px-2.5 sm:px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                showSuggestionsModal
-                  ? 'border-rose-600 bg-rose-600 text-white'
-                  : 'border-slate-200 dark:border-[#242A38] bg-slate-50 dark:bg-[#13161D] text-slate-800 dark:text-slate-100 hover:border-rose-500/70'
-              }`}
-            >
-              {autoSuggestionsLoading ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-500 shrink-0" />
-              ) : (
-                <Compass
-                  className={`w-3.5 h-3.5 shrink-0 ${
-                    showSuggestionsModal ? 'text-white' : 'text-rose-500'
-                  }`}
-                />
-              )}
-              <span>Suggestion</span>
-              {autoSuggestions.length > 0 && (
-                <span
-                  className={`px-1.5 py-0.2 rounded font-mono text-[10px] font-bold tabular-nums ${
-                    showSuggestionsModal
-                      ? 'bg-white/20 text-white'
-                      : 'bg-rose-600/15 text-rose-600 dark:text-rose-400'
-                  }`}
+          {/* Direct YouTube-style Top Nav Search Bar (searches right here without switching bottom tabs) */}
+          <form
+            onSubmit={handleTopSearchSubmit}
+            className="relative flex-1 max-w-md ml-auto"
+          >
+            <div className="relative flex items-center">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 pointer-events-none" />
+              <input
+                type="search"
+                value={topSearchQuery}
+                onFocus={() => setTopSearchFocused(true)}
+                onBlur={() => setTimeout(() => setTopSearchFocused(false), 180)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setTopSearchQuery(val);
+                  if (!val.trim() && topSearchOpen) {
+                    setTopSearchOpen(false);
+                  }
+                }}
+                placeholder="Search YouTube..."
+                aria-label="Search YouTube or saved videos"
+                className="w-full min-h-[38px] md:min-h-[40px] rounded-xl border border-slate-200 dark:border-[#242A38] bg-slate-100/80 dark:bg-[#13161D] pl-9 pr-20 text-xs sm:text-sm text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-rose-600/50 focus:bg-white dark:focus:bg-[#171B24]"
+              />
+              {topSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTopSearchQuery('');
+                    setLiveSuggestVideos([]);
+                    setTopSearchOpen(false);
+                  }}
+                  aria-label="Clear search"
+                  className="absolute right-11 p-1 text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer"
                 >
-                  {autoSuggestions.length}
-                </span>
+                  <X className="w-3.5 h-3.5" />
+                </button>
               )}
-            </button>
+              <button
+                type="submit"
+                aria-label="Search YouTube"
+                title="Search YouTube"
+                className="absolute right-1 min-h-[30px] min-w-[34px] px-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center cursor-pointer"
+              >
+                <Search className="w-3.5 h-3.5" />
+              </button>
+            </div>
 
-            <PWAInstallButton />
-            <button
-              type="button"
-              onClick={toggleTheme}
-              aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-              className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg border border-slate-200 dark:border-[#1E2430] text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-[#171B24] transition-colors cursor-pointer"
-            >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-            </button>
-          </div>
+            {/* Live YouTube + Saved Dropdown while typing */}
+            {topSearchFocused && !topSearchOpen && topSearchQuery.trim().length > 0 && (
+              <div className="absolute left-0 right-0 top-full mt-2 rounded-2xl border border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] shadow-2xl overflow-hidden z-50">
+                <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-[#1E2430]">
+                  {quickSearchMatches.map((m) => (
+                    <button
+                      key={`saved-${m.id}`}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setTopSearchFocused(false);
+                        setTopSearchOpen(false);
+                        handleSelectVideo(m.id);
+                      }}
+                      className="w-full px-3 py-2 flex items-center gap-2.5 text-left hover:bg-slate-50 dark:hover:bg-[#171B24] cursor-pointer"
+                    >
+                      <div className="w-12 aspect-video rounded bg-black overflow-hidden shrink-0">
+                        <CachedThumbnail
+                          videoId={m.videoId}
+                          alt={m.title}
+                          isOnline={isOnline}
+                          fit="cover"
+                          className="w-full h-full"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                          {m.title}
+                        </div>
+                        <div className="text-[11px] text-emerald-600 dark:text-emerald-400 truncate">
+                          Saved · {m.authorName}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+
+                  {liveSuggestVideos.map((v) => (
+                    <button
+                      key={`yt-${v.videoId}`}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setTopSearchFocused(false);
+                        setTopSearchOpen(false);
+                        handleCaptureSuggestedVideo(
+                          {
+                            videoId: v.videoId,
+                            title: v.title,
+                            authorName: v.authorName,
+                            authorUrl: v.authorUrl,
+                            durationSeconds: v.durationSeconds,
+                          },
+                          true
+                        );
+                      }}
+                      className="w-full px-3 py-2 flex items-center gap-2.5 text-left hover:bg-slate-50 dark:hover:bg-[#171B24] cursor-pointer"
+                    >
+                      <div className="w-12 aspect-video rounded bg-black overflow-hidden shrink-0">
+                        <CachedThumbnail
+                          videoId={v.videoId}
+                          alt={v.title}
+                          isOnline={isOnline}
+                          fit="cover"
+                          className="w-full h-full"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold text-slate-900 dark:text-white truncate">
+                          {v.title}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          YouTube · {v.authorName}
+                          {v.durationText ? ` · ${v.durationText}` : ''}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+
+                  {liveSuggestLoading && liveSuggestVideos.length === 0 && (
+                    <div className="px-3.5 py-2.5 text-xs text-slate-400">
+                      Searching YouTube...
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    openDirectTopSearch(topSearchQuery);
+                  }}
+                  className="w-full px-3.5 py-2.5 bg-slate-50 dark:bg-[#0B0D11] border-t border-slate-100 dark:border-[#1E2430] text-left text-xs font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-600/10 flex items-center gap-2 cursor-pointer"
+                >
+                  <Search className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">
+                    Show all results for &ldquo;{topSearchQuery.trim()}&rdquo;
+                  </span>
+                </button>
+              </div>
+            )}
+          </form>
         </div>
       </header>
 
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-2.5 sm:px-6 py-4 sm:py-5 pb-28 md:pb-24">
+      <main
+        className={
+          activeView === 'reels' && !topSearchOpen
+            ? 'flex-1 w-full max-w-[1440px] mx-auto px-2.5 sm:px-6 pt-0 pb-14 md:py-3'
+            : 'flex-1 w-full max-w-[1440px] mx-auto px-2.5 sm:px-6 py-4 sm:py-5 pb-28 md:pb-24'
+        }
+      >
         {loading ? (
           <div className="rounded-2xl border border-slate-200 dark:border-[#1E2430] bg-white dark:bg-[#13161D] p-12 text-center text-sm text-slate-500">
             Loading your TubeVault feed...
           </div>
+        ) : topSearchOpen ? (
+          <TopSearchResultsView
+            query={topSearchActiveQuery || topSearchQuery}
+            searchNonce={topSearchNonce}
+            videos={videos}
+            existingVideoIds={existingVideoIds}
+            isOnline={isOnline}
+            activeInlineKey={activeInlineKey}
+            onPlayInline={handlePlayInline}
+            onStopInline={handleStopInline}
+            onCaptureSuggestedVideo={handleCaptureSuggestedVideo}
+            onSaveAndLikeVideo={handleSaveAndLikeVideo}
+            onPlayInMusic={handlePlaySearchInMusic}
+            onSelectSavedVideo={handleSelectVideo}
+            onToggleLikeSaved={handleToggleLike}
+            onClose={() => setTopSearchOpen(false)}
+          />
+        ) : activeView === 'reels' ? (
+          <ReelsFeedView
+            videos={videos}
+            existingVideoIds={existingVideoIds}
+            isOnline={isOnline}
+            onReelPlaybackStarted={handleReelPlaybackStarted}
+            onSaveReel={(s) => handleCaptureSuggestedVideo(s, false)}
+            onSaveAndLikeReel={handleSaveAndLikeVideo}
+            onPlayReelInMusic={handlePlaySearchInMusic}
+            onOpenReelInPlayer={(s) => handleCaptureSuggestedVideo(s, true)}
+            onToggleLikeSaved={handleToggleLike}
+          />
         ) : activeView === 'music' ? (
           <MusicPlayerView
             videos={videos}
             collections={collections}
             isOnline={isOnline}
             controller={musicController}
+            onToggleLike={handleToggleLike}
+            onLoadStarters={handleLoadStarterVideos}
           />
         ) : activeView === 'discover' ? (
           <Suspense
@@ -1076,6 +1457,16 @@ export default function App() {
               stats={stats}
               videos={videos}
               isOnline={isOnline}
+              darkMode={darkMode}
+              autoSuggestionsCount={autoSuggestions.length}
+              autoSuggestionsLoading={autoSuggestionsLoading}
+              onToggleTheme={toggleTheme}
+              onOpenSuggestions={() => setShowSuggestionsModal(true)}
+              onOpenAddHub={() => setShowQuickAddHub(true)}
+              onToggleLike={handleToggleLike}
+              onSelectVideo={handleSelectVideo}
+              onDeleteSingleVideo={handleDeleteVideo}
+              onBulkDeleteVideos={handleBulkDeleteVideos}
               onRefreshLibrary={refreshLibrary}
               onStatsChange={refreshStats}
             />
@@ -1090,16 +1481,26 @@ export default function App() {
                 Your TubeVault Feed is Empty
               </h1>
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Tap the <strong>+</strong> button at the bottom to add YouTube links, playlists, or search any creator channel.
+                Search YouTube in the top bar, tap <strong>+</strong> to add links, or load starter videos.
               </p>
-              <button
-                type="button"
-                onClick={() => setShowQuickAddHub(true)}
-                className="min-h-[44px] px-5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold inline-flex items-center gap-2 cursor-pointer"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Add Videos or Music</span>
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowQuickAddHub(true)}
+                  className="min-h-[44px] px-5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold inline-flex items-center gap-2 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add Videos or Music</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoadStarterVideos}
+                  disabled={restoringStarters}
+                  className="min-h-[44px] px-5 rounded-xl border border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] text-slate-800 dark:text-slate-100 text-sm font-semibold hover:border-rose-500/60 disabled:opacity-50 cursor-pointer"
+                >
+                  {restoringStarters ? 'Loading...' : 'Load Starter Videos'}
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-6">
@@ -1213,6 +1614,7 @@ export default function App() {
                 onSelectVideo={handleSelectVideo}
                 onMoveVideo={handleMoveVideo}
                 onPlayNext={handlePlayNext}
+                onToggleLike={handleToggleLike}
                 onDeleteVideo={handleDeleteVideo}
                 layout="grid"
               />
@@ -1241,7 +1643,7 @@ export default function App() {
         ) : null}
 
         {/* Persistent Player + Queue Layout */}
-        {!loading && videos.length > 0 && activeVideo && (
+        {!loading && !topSearchOpen && videos.length > 0 && activeVideo && (
           <div
             className={
               activeView === 'player'
@@ -1355,6 +1757,7 @@ export default function App() {
                   onSelectVideo={handleSelectVideo}
                   onMoveVideo={handleMoveVideo}
                   onPlayNext={handlePlayNext}
+                  onToggleLike={handleToggleLike}
                   onDeleteVideo={handleDeleteVideo}
                   layout="sidebar"
                 />
@@ -1369,30 +1772,47 @@ export default function App() {
         <MusicMiniBar
           controller={musicController}
           isOnline={isOnline}
-          onOpenMusic={() => setActiveView('music')}
+          onOpenMusic={() => {
+            setTopSearchOpen(false);
+            setActiveView('music');
+          }}
         />
       )}
 
-      {/* Desktop Bottom-Left Dock: '+' Hub + 'Music' Audio Mode */}
+      {/* Desktop Bottom-Left Dock: 'Reels' + 'Music' (no '+' Add button) */}
       <div className="hidden md:flex fixed bottom-5 left-6 z-40 items-center gap-2">
         <button
           type="button"
-          onClick={() => setShowQuickAddHub(true)}
-          aria-label="Add YouTube links, search, or import playlist"
-          title="Add Links, Search YouTube, or Import JSON"
-          className="min-h-[48px] px-4 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold inline-flex items-center gap-2 shadow-xl shadow-rose-600/25 transition-transform active:scale-95 cursor-pointer"
+          onClick={() => {
+            setTopSearchOpen(false);
+            setActiveView('reels');
+          }}
+          aria-label="Open Reels Shorts Feed"
+          title="Endless vertical Reels feed"
+          className={`min-h-[48px] px-4 rounded-2xl border text-xs font-semibold inline-flex items-center gap-2 shadow-xl transition-all active:scale-95 cursor-pointer ${
+            !topSearchOpen && activeView === 'reels'
+              ? 'bg-rose-600 text-white border-transparent shadow-rose-600/25'
+              : 'bg-white/95 dark:bg-[#13161D]/95 backdrop-blur-md border-slate-200 dark:border-[#242A38] text-slate-800 dark:text-white hover:border-rose-500/60'
+          }`}
         >
-          <Plus className="w-5 h-5" />
-          <span>Add</span>
+          <Clapperboard
+            className={`w-4 h-4 ${
+              !topSearchOpen && activeView === 'reels' ? 'text-white' : 'text-rose-500'
+            }`}
+          />
+          <span>Reels</span>
         </button>
 
         <button
           type="button"
-          onClick={() => setActiveView('music')}
+          onClick={() => {
+            setTopSearchOpen(false);
+            setActiveView('music');
+          }}
           aria-label="Open Music Audio Mode"
           title="Listen to any video as instant audio-only music"
           className={`min-h-[48px] px-4 rounded-2xl border text-xs font-semibold inline-flex items-center gap-2 shadow-xl transition-all active:scale-95 cursor-pointer ${
-            activeView === 'music'
+            !topSearchOpen && activeView === 'music'
               ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-transparent'
               : 'bg-white/95 dark:bg-[#13161D]/95 backdrop-blur-md border-slate-200 dark:border-[#242A38] text-slate-800 dark:text-white hover:border-rose-500/60'
           }`}
@@ -1402,19 +1822,22 @@ export default function App() {
         </button>
       </div>
 
-      {/* Mobile Bottom Navigation Bar with Music & Center '+' Hub Trigger */}
+      {/* Mobile Bottom Navigation Bar: Home | Music | Reels | Discover | Library */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 h-14 pb-safe border-t border-slate-200 dark:border-[#1E2430] bg-white/95 dark:bg-[#0B0D11]/95 backdrop-blur-md grid grid-cols-5 items-center">
         {[
           {id: 'home' as AppView, label: 'Home', icon: Home},
           {id: 'music' as AppView, label: 'Music', icon: Headphones},
         ].map((tab) => {
           const Icon = tab.icon;
-          const active = activeView === tab.id;
+          const active = !topSearchOpen && activeView === tab.id;
           return (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveView(tab.id)}
+              onClick={() => {
+                setTopSearchOpen(false);
+                setActiveView(tab.id);
+              }}
               className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                 active
                   ? 'text-rose-600 dark:text-rose-500'
@@ -1427,29 +1850,38 @@ export default function App() {
           );
         })}
 
-        {/* Center Unified '+' Hub Trigger */}
-        <div className="flex items-center justify-center">
-          <button
-            type="button"
-            onClick={() => setShowQuickAddHub(true)}
-            aria-label="Add links, search YouTube, or import backup"
-            className="w-11 h-10 rounded-xl bg-rose-600 hover:bg-rose-700 text-white flex items-center justify-center shadow-md shadow-rose-600/25 active:scale-95 transition-transform cursor-pointer"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
-        </div>
+        {/* Center Reels Feed Trigger */}
+        <button
+          type="button"
+          onClick={() => {
+            setTopSearchOpen(false);
+            setActiveView('reels');
+          }}
+          aria-label="Open endless Reels feed"
+          className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+            !topSearchOpen && activeView === 'reels'
+              ? 'text-rose-600 dark:text-rose-500'
+              : 'text-slate-600 dark:text-slate-300'
+          }`}
+        >
+          <Clapperboard className="w-5 h-5" />
+          <span className="text-[10px] font-semibold tracking-tight">Reels</span>
+        </button>
 
         {[
           {id: 'discover' as AppView, label: 'Discover', icon: Search},
           {id: 'storage' as AppView, label: 'Library', icon: Database},
         ].map((tab) => {
           const Icon = tab.icon;
-          const active = activeView === tab.id;
+          const active = !topSearchOpen && activeView === tab.id;
           return (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveView(tab.id)}
+              onClick={() => {
+                setTopSearchOpen(false);
+                setActiveView(tab.id);
+              }}
               className={`min-h-[44px] flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
                 active
                   ? 'text-rose-600 dark:text-rose-500'

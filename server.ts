@@ -4,6 +4,7 @@ import {fileURLToPath} from 'url';
 import {
   getChannelVideos,
   getPlaylistVideos,
+  getReelsFeed,
   getRelatedVideos,
   getThumbnailBinary,
   getVideoMetadata,
@@ -87,6 +88,19 @@ async function startServer() {
       res.json(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Search failed';
+      res.status(502).json({error: msg});
+    }
+  });
+
+  app.get('/api/youtube/reels', async (req, res) => {
+    const topic = String(req.query.topic || 'all').trim();
+    const page = Math.max(0, Number.parseInt(String(req.query.page || '0'), 10) || 0);
+
+    try {
+      const result = await getReelsFeed(topic, page);
+      res.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not fetch reels feed';
       res.status(502).json({error: msg});
     }
   });
