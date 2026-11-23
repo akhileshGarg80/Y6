@@ -938,11 +938,11 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-[#0B0D11] dark:text-slate-100">
-      {/* Persistent Warm Audio-Only YouTube Engine (offscreen 220x124 avoids mobile 1x1 suspension throttling) */}
+      {/* Persistent Warm Audio-Only YouTube Engine (in-viewport -z-10 prevents offscreen occlusion throttling) */}
       <div
         ref={audioHostRef}
         aria-hidden="true"
-        className="fixed -left-[9999px] top-0 w-[220px] h-[124px] pointer-events-none overflow-hidden"
+        className="fixed bottom-0 left-0 -z-10 w-[200px] h-[112px] opacity-[0.01] pointer-events-none overflow-hidden"
       />
 
       {/* Clean Three-Zone Top Bar */}
