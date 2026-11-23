@@ -3,6 +3,8 @@ import {
   Disc3,
   Headphones,
   Loader2,
+  Lock,
+  Moon,
   Pause,
   Play,
   Repeat,
@@ -11,11 +13,13 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
+  Unlock,
   Volume2,
   VolumeX,
   WifiOff,
   X,
 } from 'lucide-react';
+import {updateMediaSession} from '../lib/mediaSession';
 import {getThumbnailBlob} from '../lib/offlineDb';
 import {formatDuration} from '../lib/youtube';
 import type {VideoItem} from '../types/video';
@@ -325,16 +329,60 @@ export function useMusicAudioEngine({
     return () => clearInterval(interval);
   }, [activeTrackId, isPlaying]);
 
+  // Background Auto-Resume Guard: attempt to keep music playing on tab switch / app minimize
+  const isPlayingRef = useRef(isPlaying);
+  isPlayingRef.current = isPlaying;
+  const userPausedRef = useRef(false);
+
+  useEffect(() => {
+    let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleVisibility = () => {
+      const p = playerRef.current;
+      if (!p || !readyRef.current) return;
+
+      if (document.visibilityState === 'hidden') {
+        if (isPlayingRef.current && !userPausedRef.current) {
+          resumeTimer = setTimeout(() => {
+            try {
+              const st = p.getPlayerState();
+              if (st !== 1 && !userPausedRef.current) {
+                p.playVideo();
+              }
+            } catch {
+              // Browser OS policy paused iframe cleanly
+            }
+          }, 260);
+        }
+      } else if (document.visibilityState === 'visible') {
+        try {
+          const st = p.getPlayerState();
+          setIsPlaying(st === 1);
+        } catch {
+          // Ignore
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      if (resumeTimer) clearTimeout(resumeTimer);
+    };
+  }, []);
+
   const playTrack = useCallback(
     (item: VideoItem) => {
       if (!isOnline) {
         setErrorMsg('Connect to the internet to play music audio.');
         return;
       }
+      userPausedRef.current = false;
       if (activeTrackRef.current?.id === item.id && playerRef.current && readyRef.current) {
         try {
           const st = playerRef.current.getPlayerState();
           if (st === 1) {
+            userPausedRef.current = true;
             playerRef.current.pauseVideo();
             setIsPlaying(false);
           } else {
@@ -355,6 +403,7 @@ export function useMusicAudioEngine({
   const togglePlayPause = useCallback(() => {
     const list = videosRef.current;
     if (!activeTrackRef.current) {
+      userPausedRef.current = false;
       if (list[0]) loadAndPlayByItem(list[0]);
       return;
     }
@@ -362,9 +411,11 @@ export function useMusicAudioEngine({
     try {
       const st = playerRef.current.getPlayerState();
       if (st === 1) {
+        userPausedRef.current = true;
         playerRef.current.pauseVideo();
         setIsPlaying(false);
       } else {
+        userPausedRef.current = false;
         onPlaybackStartedRef.current();
         playerRef.current.playVideo();
         setIsPlaying(true);
@@ -435,6 +486,7 @@ export function useMusicAudioEngine({
   );
 
   const stopAndClear = useCallback(() => {
+    userPausedRef.current = true;
     if (playerRef.current && readyRef.current) {
       try {
         playerRef.current.pauseVideo();
@@ -447,6 +499,37 @@ export function useMusicAudioEngine({
     setActiveTrackId(null);
     setCurrentTime(0);
   }, []);
+
+  // Wire Lock-Screen, Notification Bar & Bluetooth Headphone controls via Media Session API
+  useEffect(() => {
+    if (!activeTrack) return;
+    updateMediaSession(
+      activeTrack,
+      {
+        isPlaying,
+        duration,
+        currentTime,
+        playbackRate,
+      },
+      {
+        onPlay: () => {
+          userPausedRef.current = false;
+          onPlaybackStartedRef.current();
+          playerRef.current?.playVideo();
+          setIsPlaying(true);
+        },
+        onPause: () => {
+          userPausedRef.current = true;
+          playerRef.current?.pauseVideo();
+          setIsPlaying(false);
+        },
+        onNext: () => playNextInternal(false),
+        onPrev: () => playPrev(),
+        onSeekTo: (sec) => seekTo(sec),
+        onSeekBy: (delta) => seekTo(Math.max(0, currentTime + delta)),
+      }
+    );
+  }, [activeTrack, isPlaying, duration, currentTime, playbackRate, playNextInternal, playPrev, seekTo]);
 
   return {
     audioHostRef,
@@ -491,9 +574,51 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCollection, setActiveCollection] = useState('All');
   const [glowUrl, setGlowUrl] = useState<string | null>(null);
+  const [pocketMode, setPocketMode] = useState(false);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [lastBlackTapAt, setLastBlackTapAt] = useState(0);
+  const [unlockHint, setUnlockHint] = useState(false);
   const scrubberRef = useRef<HTMLDivElement | null>(null);
 
   const displayTrack = controller.activeTrack ?? videos[0] ?? null;
+
+  // Screen Wake Lock while AMOLED Pocket Mode is active so audio keeps playing nonstop
+  useEffect(() => {
+    if (!pocketMode) {
+      setWakeLockActive(false);
+      return;
+    }
+
+    let sentinel: {release: () => Promise<void>} | null = null;
+    let cancelled = false;
+
+    const acquireWakeLock = async () => {
+      try {
+        const nav = navigator as Navigator & {
+          wakeLock?: {request: (type: 'screen') => Promise<{release: () => Promise<void>}>};
+        };
+        if (nav.wakeLock?.request && document.visibilityState === 'visible') {
+          sentinel = await nav.wakeLock.request('screen');
+          if (!cancelled) setWakeLockActive(true);
+        }
+      } catch {
+        if (!cancelled) setWakeLockActive(false);
+      }
+    };
+
+    acquireWakeLock();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') acquireWakeLock();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      sentinel?.release().catch(() => {});
+      setWakeLockActive(false);
+    };
+  }, [pocketMode]);
 
   useEffect(() => {
     if (!displayTrack) {
@@ -540,6 +665,18 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
     controller.seekTo(ratio * controller.duration);
   }
 
+  function handlePocketSurfaceTap() {
+    const now = Date.now();
+    if (now - lastBlackTapAt < 420) {
+      setPocketMode(false);
+      setUnlockHint(false);
+    } else {
+      setLastBlackTapAt(now);
+      setUnlockHint(true);
+      setTimeout(() => setUnlockHint(false), 1800);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -549,13 +686,30 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
             <span>Music Audio Mode</span>
           </h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-            Click any video below to play instant sound-only audio with zero video clutter.
+            Sound-only music playback with lock-screen controls &amp; Pocket Black-Screen mode.
           </p>
         </div>
 
-        <span className="font-mono text-xs tabular-nums text-slate-500 dark:text-slate-400">
-          {videos.length} tracks ready
-        </span>
+        <div className="flex items-center gap-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              if (!controller.activeTrack && displayTrack) {
+                controller.playTrack(displayTrack);
+              }
+              setPocketMode(true);
+            }}
+            title="Turn screen pitch black & lock touches while song keeps playing in pocket"
+            className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 dark:border-[#242A38] bg-white dark:bg-[#13161D] hover:border-rose-500/60 text-xs font-semibold text-slate-800 dark:text-white inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+          >
+            <Moon className="w-3.5 h-3.5 text-rose-500" />
+            <span>Pocket Black Screen</span>
+          </button>
+
+          <span className="font-mono text-xs tabular-nums text-slate-500 dark:text-slate-400">
+            {videos.length} tracks
+          </span>
+        </div>
       </div>
 
       {!isOnline && (
@@ -853,6 +1007,101 @@ export const MusicPlayerView: React.FC<MusicPlayerViewProps> = ({
             })}
           </div>
         </>
+      )}
+
+      {/* AMOLED Pitch-Black Pocket Mode Overlay */}
+      {pocketMode && (
+        <div
+          onClick={handlePocketSurfaceTap}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Pocket black screen music mode"
+          className="fixed inset-0 z-50 bg-black text-white flex flex-col items-center justify-between p-6 select-none cursor-pointer"
+        >
+          <div className="w-full flex items-center justify-between text-[11px] font-mono text-white/35">
+            <span className="inline-flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5" />
+              <span>AMOLED Pocket Mode {wakeLockActive ? '· Screen Awake' : ''}</span>
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setPocketMode(false);
+              }}
+              className="px-3 py-1.5 rounded-lg border border-white/15 text-white/60 hover:text-white inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Unlock className="w-3.5 h-3.5" />
+              <span>Unlock</span>
+            </button>
+          </div>
+
+          <div className="max-w-sm w-full text-center space-y-5">
+            {displayTrack && (
+              <>
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-mono uppercase tracking-widest text-rose-500/75">
+                    {controller.isPlaying ? 'Playing Audio' : 'Paused'}
+                  </div>
+                  <h2 className="text-base font-semibold text-white/75 line-clamp-2">
+                    {displayTrack.title}
+                  </h2>
+                  <p className="text-xs text-white/35">{displayTrack.authorName}</p>
+                </div>
+
+                <div className="font-mono text-xs text-white/40 tabular-nums">
+                  {formatDuration(controller.currentTime)} /{' '}
+                  {formatDuration(controller.duration || displayTrack.durationSeconds || 0)}
+                </div>
+              </>
+            )}
+
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center justify-center gap-4 pt-2"
+            >
+              <button
+                type="button"
+                onClick={controller.playPrev}
+                aria-label="Previous track"
+                className="w-12 h-12 rounded-full border border-white/15 bg-white/[0.04] text-white/70 hover:text-white flex items-center justify-center cursor-pointer"
+              >
+                <SkipBack className="w-5 h-5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={controller.togglePlayPause}
+                aria-label={controller.isPlaying ? 'Pause' : 'Play'}
+                className="w-14 h-14 rounded-full bg-rose-600/80 hover:bg-rose-600 text-white flex items-center justify-center cursor-pointer"
+              >
+                {controller.isPlaying ? (
+                  <Pause className="w-6 h-6 fill-current" />
+                ) : (
+                  <Play className="w-6 h-6 fill-current ml-0.5" />
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={controller.playNext}
+                aria-label="Next track"
+                className="w-12 h-12 rounded-full border border-white/15 bg-white/[0.04] text-white/70 hover:text-white flex items-center justify-center cursor-pointer"
+              >
+                <SkipForward className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+
+          <div className="text-center space-y-1">
+            <p className="text-xs font-medium text-white/45">
+              {unlockHint ? 'Tap once more to unlock screen' : 'Double-tap anywhere to unlock'}
+            </p>
+            <p className="text-[10px] text-white/25 max-w-xs">
+              AMOLED black screen keeps audio playing nonstop in your pocket without accidental taps.
+            </p>
+          </div>
+        </div>
       )}
     </div>
   );

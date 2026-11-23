@@ -30,6 +30,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
+import {updateMediaSession} from '../lib/mediaSession';
 import {getThumbnailBlob} from '../lib/offlineDb';
 import {extractVideoIdFromUrl, formatDuration} from '../lib/youtube';
 import type {
@@ -685,6 +686,27 @@ export const VideoPlayerStage: React.FC<VideoPlayerStageProps> = ({
     },
     [onUpdateVideo]
   );
+
+  // Sync Stage playback with Lock Screen, Notification Bar & Bluetooth headphone controls
+  useEffect(() => {
+    if (isMini || !isOnline) return;
+    updateMediaSession(
+      video,
+      {
+        isPlaying,
+        duration,
+        currentTime,
+        playbackRate,
+      },
+      {
+        onPlay: () => ytPlayerRef.current?.playVideo(),
+        onPause: () => ytPlayerRef.current?.pauseVideo(),
+        onNext: hasNext ? () => onNextVideoRef.current() : undefined,
+        onSeekTo: (sec) => seekTo(sec),
+        onSeekBy: (delta) => seekTo(Math.max(0, currentTime + delta)),
+      }
+    );
+  }, [isMini, isOnline, video, isPlaying, duration, currentTime, playbackRate, hasNext, seekTo]);
 
   const handleAddBookmark = useCallback(
     (e?: React.FormEvent) => {
